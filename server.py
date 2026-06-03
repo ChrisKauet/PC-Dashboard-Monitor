@@ -55,7 +55,7 @@ def read_gpu_wmi():
             ["powershell", "-NoProfile", "-Command", cmd_usage],
             capture_output=True, text=True, timeout=4
         )
-        raw = result_usage.stdout.strip()
+        raw = result_usage.stdout.strip().replace(',', '.')
         gpu_usage = min(float(raw), 100.0) if raw else None
 
         # Nome e VRAM via Win32_VideoController
