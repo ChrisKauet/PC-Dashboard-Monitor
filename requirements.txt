@@ -1,5 +1,4 @@
 psutil
-pyamdgpuinfo
-pynvml
+nvidia-ml-py
 supabase
 python-dotenv
