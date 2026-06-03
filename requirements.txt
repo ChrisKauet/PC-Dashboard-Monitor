@@ -1,0 +1,5 @@
+psutil
+pyamdgpuinfo
+pynvml
+supabase
+python-dotenv
