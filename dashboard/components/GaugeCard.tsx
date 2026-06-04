@@ -10,184 +10,109 @@ interface GaugeCardProps {
   icon?: string;
 }
 
-function getTempColor(temp: number | null): string {
-  if (temp === null) return "#888";
-  if (temp <= 60) return "#22c55e";
-  if (temp <= 80) return "#eab308";
+function getTempColor(t: number | null): string {
+  if (t === null) return "var(--text-dim)";
+  if (t <= 60) return "#22d3a5";
+  if (t <= 80) return "#f59e0b";
   return "#ef4444";
 }
 
-export default function GaugeCard({
-  title,
-  value,
-  color,
-  unit = "%",
-  temp,
-  subtitle,
-  icon,
-}: GaugeCardProps) {
-  const safeValue = value ?? 0;
-  const radius = 52;
-  const circumference = 2 * Math.PI * radius;
-  const strokeDash = (safeValue / 100) * circumference;
+export default function GaugeCard({ title, value, color, unit = "%", temp, subtitle, icon }: GaugeCardProps) {
+  const safe = value ?? 0;
+  const radius = 50;
+  const circ = 2 * Math.PI * radius;
+  const dash = (safe / 100) * circ;
   const tempColor = getTempColor(temp ?? null);
 
   return (
     <div
       className="card"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "12px",
-        position: "relative",
-        overflow: "hidden",
-      }}
+      style={{ display: "flex", flexDirection: "column", gap: 14, position: "relative", overflow: "hidden" }}
     >
-      {/* Glow bg */}
-      <div
-        style={{
-          position: "absolute",
-          top: "-30px",
-          right: "-30px",
-          width: "120px",
-          height: "120px",
-          borderRadius: "50%",
-          background: `${color}10`,
-          filter: "blur(30px)",
-          pointerEvents: "none",
-        }}
-      />
+      {/* Ambient glow */}
+      <div style={{
+        position: "absolute", top: -40, right: -40,
+        width: 140, height: 140, borderRadius: "50%",
+        background: `${color}12`, filter: "blur(35px)", pointerEvents: "none",
+      }} />
 
       {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
-          <div
-            style={{
-              fontSize: "11px",
-              fontWeight: 600,
-              letterSpacing: "0.08em",
-              textTransform: "uppercase",
-              color: "#666",
-              fontFamily: "'Exo 2', sans-serif",
-            }}
-          >
-            {icon && <span style={{ marginRight: "6px" }}>{icon}</span>}
+          <div style={{
+            fontSize: 11, fontWeight: 600, letterSpacing: "0.09em",
+            textTransform: "uppercase", color: "var(--text-muted)",
+            fontFamily: "'Exo 2', sans-serif",
+          }}>
+            {icon && <span style={{ marginRight: 5 }}>{icon}</span>}
             {title}
           </div>
           {subtitle && (
-            <div style={{ fontSize: "11px", color: "#555", marginTop: "2px" }}>{subtitle}</div>
+            <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{subtitle}</div>
           )}
         </div>
+
+        {/* Temp badge */}
         {temp !== undefined && temp !== null && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "4px",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              background: `${tempColor}18`,
-              border: `1px solid ${tempColor}40`,
-            }}
-          >
-            <span style={{ fontSize: "13px" }}>🌡️</span>
-            <span
-              style={{
-                fontFamily: "'Share Tech Mono', monospace",
-                fontSize: "13px",
-                fontWeight: 600,
-                color: tempColor,
-              }}
-            >
+          <div style={{
+            display: "flex", alignItems: "center", gap: 4,
+            padding: "3px 10px", borderRadius: 999,
+            background: `${tempColor}18`, border: `1px solid ${tempColor}35`,
+          }}>
+            <span style={{ fontSize: 12 }}>🌡️</span>
+            <span style={{
+              fontFamily: "'Share Tech Mono', monospace",
+              fontSize: 12, fontWeight: 600, color: tempColor,
+            }}>
               {temp}°C
             </span>
           </div>
         )}
       </div>
 
-      {/* Gauge SVG */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ position: "relative", width: "130px", height: "130px" }}>
-          <svg width="130" height="130" viewBox="0 0 130 130">
+      {/* SVG Gauge */}
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <div style={{ position: "relative", width: 124, height: 124 }}>
+          <svg width="124" height="124" viewBox="0 0 124 124">
             {/* Track */}
-            <circle
-              cx="65"
-              cy="65"
-              r={radius}
-              fill="none"
-              stroke="#2a2a2a"
-              strokeWidth="10"
-              strokeLinecap="round"
-            />
+            <circle cx="62" cy="62" r={radius} fill="none" stroke="#1a1f2e" strokeWidth="9" />
             {/* Progress */}
             <circle
-              cx="65"
-              cy="65"
-              r={radius}
+              cx="62" cy="62" r={radius}
               fill="none"
               stroke={color}
-              strokeWidth="10"
+              strokeWidth="9"
               strokeLinecap="round"
-              strokeDasharray={`${strokeDash} ${circumference}`}
-              strokeDashoffset={circumference * 0.25}
+              strokeDasharray={`${dash} ${circ}`}
+              transform="rotate(-90 62 62)"
               style={{
-                transition: "stroke-dasharray 0.6s cubic-bezier(0.4,0,0.2,1)",
-                filter: `drop-shadow(0 0 6px ${color}80)`,
+                transition: "stroke-dasharray 0.7s cubic-bezier(0.4,0,0.2,1)",
+                filter: `drop-shadow(0 0 7px ${color}90)`,
               }}
-              transform="rotate(-90 65 65)"
             />
-            {/* Glow dot at end */}
-            {value !== null && value > 0 && (
-              <circle
-                cx="65"
-                cy="65"
-                r={radius}
-                fill="none"
-                stroke={color}
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeDasharray={`0 ${circumference}`}
-                strokeDashoffset={circumference * 0.25}
-                style={{ filter: `drop-shadow(0 0 10px ${color})` }}
-                transform="rotate(-90 65 65)"
-              />
-            )}
           </svg>
-          {/* Center value */}
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
+
+          {/* Center label */}
+          <div style={{
+            position: "absolute", inset: 0,
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center",
+          }}>
             {value === null ? (
-              <span style={{ fontSize: "13px", color: "#555" }}>N/A</span>
+              <span style={{ fontSize: 12, color: "var(--text-dim)" }}>N/A</span>
             ) : (
               <>
-                <span
-                  style={{
-                    fontFamily: "'Share Tech Mono', monospace",
-                    fontSize: "26px",
-                    fontWeight: 400,
-                    color: color,
-                    lineHeight: 1,
-                    textShadow: `0 0 20px ${color}60`,
-                  }}
-                >
-                  {Math.round(safeValue)}
+                <span style={{
+                  fontFamily: "'Share Tech Mono', monospace",
+                  fontSize: 28, fontWeight: 400, color, lineHeight: 1,
+                  textShadow: `0 0 18px ${color}70`,
+                }}>
+                  {Math.round(safe)}
                 </span>
-                <span
-                  style={{
-                    fontFamily: "'Share Tech Mono', monospace",
-                    fontSize: "12px",
-                    color: "#666",
-                    marginTop: "2px",
-                  }}
-                >
+                <span style={{
+                  fontFamily: "'Share Tech Mono', monospace",
+                  fontSize: 11, color: "var(--text-dim)", marginTop: 2,
+                }}>
                   {unit}
                 </span>
               </>

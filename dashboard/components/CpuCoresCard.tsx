@@ -9,8 +9,8 @@ export default function CpuCoresCard({ cores }: CpuCoresCardProps) {
 
   const getBarColor = (v: number) => {
     if (v >= 90) return "#ef4444";
-    if (v >= 70) return "#eab308";
-    return "#00e5ff";
+    if (v >= 70) return "#f59e0b";
+    return "#00d4ff";
   };
 
   return (
@@ -33,7 +33,7 @@ export default function CpuCoresCard({ cores }: CpuCoresCardProps) {
           width: "100px",
           height: "100px",
           borderRadius: "50%",
-          background: "#00e5ff08",
+          background: "#00d4ff09",
           filter: "blur(25px)",
           pointerEvents: "none",
         }}
@@ -45,7 +45,7 @@ export default function CpuCoresCard({ cores }: CpuCoresCardProps) {
           fontWeight: 600,
           letterSpacing: "0.08em",
           textTransform: "uppercase",
-          color: "#666",
+          color: "var(--text-muted)",
           fontFamily: "'Exo 2', sans-serif",
         }}
       >
@@ -76,12 +76,12 @@ export default function CpuCoresCard({ cores }: CpuCoresCardProps) {
                 style={{
                   width: "100%",
                   height: "50px",
-                  background: "#111",
+                  background: "var(--bg)",
                   borderRadius: "6px",
                   overflow: "hidden",
                   display: "flex",
                   flexDirection: "column-reverse",
-                  border: "1px solid #222",
+                  border: "1px solid var(--border)",
                 }}
               >
                 <div
@@ -105,7 +105,7 @@ export default function CpuCoresCard({ cores }: CpuCoresCardProps) {
               >
                 {Math.round(usage)}%
               </span>
-              <span style={{ fontSize: "9px", color: "#444", fontFamily: "'Exo 2', sans-serif" }}>
+              <span style={{ fontSize: "9px", color: "var(--text-dim)", fontFamily: "'Exo 2', sans-serif" }}>
                 C{i}
               </span>
             </div>

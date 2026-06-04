@@ -91,8 +91,8 @@ export default function StorageCard({ disks }: StorageCardProps) {
               style={{
                 padding: "12px",
                 borderRadius: "10px",
-                background: "#111",
-                border: `1px solid ${isCritical ? "#ef444440" : "#222"}`,
+                background: "var(--bg)",
+                border: `1px solid ${isCritical ? "#ef444440" : "var(--border)"}`,
                 boxShadow: isCritical ? "0 0 12px rgba(239,68,68,0.1)" : "none",
               }}
             >
@@ -155,7 +155,7 @@ export default function StorageCard({ disks }: StorageCardProps) {
                   style={{
                     fontFamily: "'Share Tech Mono', monospace",
                     fontSize: "13px",
-                    color: "#555",
+                    color: "var(--text-muted)",
                   }}
                 >
                   / {disk.total_gb.toFixed(1)} GB
@@ -167,7 +167,7 @@ export default function StorageCard({ disks }: StorageCardProps) {
                 style={{
                   width: "100%",
                   height: "5px",
-                  background: "#2a2a2a",
+                  background: "var(--border)",
                   borderRadius: "999px",
                   overflow: "hidden",
                 }}

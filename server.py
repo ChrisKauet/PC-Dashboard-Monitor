@@ -80,6 +80,121 @@ try:
 except Exception:
     pass
 
+# ── Sensor: LibreHardwareMonitor CSV log reader (primary method) ─
+_LHM_DIR = r"C:\Users\Kauezin\Downloads\LibreHardwareMonitor"
+
+def _find_latest_lhm_csv():
+    """Encontra o CSV de log mais recente do LibreHardwareMonitor."""
+    import glob
+    pattern = os.path.join(_LHM_DIR, "LibreHardwareMonitorLog-*.csv")
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+def read_lhm_csv():
+    """Lê temperatura de CPU e GPU do CSV de log do LHM.
+    Retorna dict com cpu_temp e gpu_temp (float ou None).
+    """
+    csv_path = _find_latest_lhm_csv()
+    if not csv_path:
+        return {"cpu_temp": None, "gpu_temp": None}
+
+    try:
+        # Evitar ler arquivos muito antigos (> 60s = LHM parado)
+        age = time.time() - os.path.getmtime(csv_path)
+        if age > 60:
+            return {"cpu_temp": None, "gpu_temp": None}
+
+        with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+            # Ler apenas as 2 últimas linhas para evitar carregar arquivo inteiro
+            lines = f.readlines()
+
+        if len(lines) < 2:
+            return {"cpu_temp": None, "gpu_temp": None}
+
+        # Processar header — LHM usa os identificadores de sensor como colunas
+        raw_headers = lines[0].rstrip("\n").split(",")
+        headers = [h.strip().strip('"') for h in raw_headers]
+
+        # Última linha de dados
+        raw_values = lines[-1].rstrip("\n").split(",")
+        values = [v.strip().strip('"') for v in raw_values]
+
+        # Mapear header -> valor
+        row = {}
+        for i, h in enumerate(headers):
+            if i < len(values):
+                row[h] = values[i]
+
+        cpu_temp = None
+        gpu_temp = None
+
+        # CPU: preferência por Tctl/Tdie (AMD) → temperature/2 do amdcpu → qualquer sensor cpu temp
+        cpu_priority = [
+            "/amdcpu/0/temperature/2",
+            "/intelcpu/0/temperature/0",
+            "/amdcpu/0/temperature/0",
+            "/intelcpu/0/temperature/2",
+        ]
+        for key in cpu_priority:
+            if key in row and row[key] not in ("", "NaN"):
+                try:
+                    v = float(row[key].replace(",", "."))
+                    if 0 < v < 120:
+                        cpu_temp = round(v, 1)
+                        break
+                except ValueError:
+                    pass
+
+        # Fallback CPU: qualquer coluna amdcpu ou intelcpu > temperature
+        if cpu_temp is None:
+            for k, v in row.items():
+                if ("amdcpu" in k or "intelcpu" in k) and "temperature" in k and v not in ("", "NaN"):
+                    try:
+                        val = float(v.replace(",", "."))
+                        if 0 < val < 120:
+                            cpu_temp = round(val, 1)
+                            break
+                    except ValueError:
+                        pass
+
+        # GPU: AMD RX → /gpu-amd/0/temperature/0 (GPU Core), /gpu-amd/0/temperature/1 (Hot Spot)
+        gpu_priority = [
+            "/gpu-amd/0/temperature/0",
+            "/gpu-nvidia/0/temperature/0",
+            "/gpu-intel/0/temperature/0",
+            "/gpu-amd/0/temperature/1",
+        ]
+        for key in gpu_priority:
+            if key in row and row[key] not in ("", "NaN"):
+                try:
+                    v = float(row[key].replace(",", "."))
+                    if 0 < v < 120:
+                        gpu_temp = round(v, 1)
+                        break
+                except ValueError:
+                    pass
+
+        # Fallback GPU: qualquer coluna gpu-* > temperature
+        if gpu_temp is None:
+            for k, v in row.items():
+                if k.startswith("/gpu-") and "temperature" in k and v not in ("", "NaN"):
+                    try:
+                        val = float(v.replace(",", "."))
+                        if 0 < val < 120:
+                            gpu_temp = round(val, 1)
+                            break
+                    except ValueError:
+                        pass
+
+        return {"cpu_temp": cpu_temp, "gpu_temp": gpu_temp}
+
+    except Exception as e:
+        print(f"[LHM CSV] erro: {e}")
+        return {"cpu_temp": None, "gpu_temp": None}
+
+
 # ── Sensor: LibreHardwareMonitor / OpenHardwareMonitor via WMI ───
 def read_lhm_sensors():
     sensors = []
@@ -161,15 +276,19 @@ def read_gpu_wmi():
             else:
                 gpu_vendor = "unknown"
 
-        gpu_temp = None
-        try:
-            sensors = read_lhm_sensors()
-            for s in sensors:
-                if "gpu" in s["name"].lower():
-                    gpu_temp = s["value"]
-                    break
-        except Exception:
-            pass
+        # Temperatura GPU via CSV do LHM (método principal)
+        gpu_temp = read_lhm_csv().get("gpu_temp")
+
+        # Fallback: WMI LHM sensors
+        if gpu_temp is None:
+            try:
+                sensors = read_lhm_sensors()
+                for s in sensors:
+                    if "gpu" in s["name"].lower():
+                        gpu_temp = s["value"]
+                        break
+            except Exception:
+                pass
 
         return {
             "gpu_usage": round(gpu_usage, 1) if gpu_usage is not None else None,
@@ -220,7 +339,15 @@ def read_gpu():
 
 # ── CPU Temperature ──────────────────────────────────────────────
 def read_cpu_temp():
-    # Method 1: psutil (most reliable, works with LibreHardwareMonitor driver)
+    # Method 1: LHM CSV log (principal no Windows — não precisa de WMI habilitado)
+    try:
+        temp = read_lhm_csv().get("cpu_temp")
+        if temp is not None:
+            return temp
+    except Exception:
+        pass
+
+    # Method 2: psutil (funciona no Linux com drivers de sensor)
     try:
         temps = psutil.sensors_temperatures()
         for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz", "zenpower"):
@@ -229,7 +356,7 @@ def read_cpu_temp():
     except Exception:
         pass
 
-    # Method 2: LibreHardwareMonitor / OpenHardwareMonitor via WMI
+    # Method 3: LibreHardwareMonitor / OpenHardwareMonitor via WMI
     try:
         sensors = read_lhm_sensors()
         for s in sensors:
@@ -241,7 +368,7 @@ def read_cpu_temp():
     except Exception:
         pass
 
-    # Method 3: WMI MSAcpi_ThermalZoneTemperature
+    # Method 4: WMI MSAcpi_ThermalZoneTemperature
     try:
         cmd = (
             'Get-CimInstance -Namespace "root/wmi" -ClassName "MSAcpi_ThermalZoneTemperature" -ErrorAction SilentlyContinue'
