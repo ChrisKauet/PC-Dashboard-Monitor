@@ -23,14 +23,34 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-# Node
+
+# Node / Next.js
 dashboard/node_modules/
 dashboard/.next/
+dashboard/nul
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Backup files
+*.backup
+*.backup-*
+*.bak2
+*.old
+*.original
+*.before-update
+*.pre-update
+*.new
+
 # OS
 .DS_Store
 Thumbs.db
+
 # Logs
 *.log
+
 # IDE
 .vscode/
 .idea/
@@ -39,3 +59,6 @@ Thumbs.db
 *.njsproj
 *.sln
 *.swp
+
+# Misc
+nul

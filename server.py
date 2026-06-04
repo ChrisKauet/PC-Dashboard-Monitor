@@ -1,47 +1,85 @@
-# Imports
-import time, socket, os, subprocess
-from dotenv import load_dotenv
+"""
+PC Dashboard Monitor — Backend Collector
+No database. No Supabase. Pure Flask API serving real-time sensor data.
+Single-instance enforcement. 1-second cooldown between readings.
+"""
+
+import os
+import sys
+import time
+import socket
+import subprocess
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 import psutil
-from supabase import create_client
 
-load_dotenv()
+# ── Resolve .env relative to exe/script path ──────────────────────
+def get_base_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
-# Inicializar cliente Supabase com service_role key
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY"))
-INTERVAL = int(os.getenv("PUSH_INTERVAL_SECONDS", 5))
+BASE_DIR = get_base_dir()
 
-# ──────────────────────────────────────────
-# Tentar nvidia-ml-py (pacote correto para NVIDIA)
-# ──────────────────────────────────────────
+# ── Load .env manually (no dependency) ────────────────────────────
+def load_env():
+    env_path = os.path.join(BASE_DIR, ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    os.environ.setdefault(key.strip(), val.strip())
+
+load_env()
+
+# ── Config ────────────────────────────────────────────────────────
+PORT = int(os.getenv("SENSOR_PORT", 8080))
+COOLDOWN = float(os.getenv("SENSOR_COOLDOWN", 1.0))
+TUNNEL_TYPE = os.getenv("TUNNEL_TYPE", "cloudflare")  # "cloudflare" or "ngrok"
+TUNNEL_TOKEN = os.getenv("TUNNEL_TOKEN", "")
+TUNNEL_URL_FILE = os.path.join(BASE_DIR, "tunnel_url.txt")
+
+# ── Single-instance enforcement ───────────────────────────────────
+def enforce_single_instance():
+    """Use a named mutex to ensure only one instance runs."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        mutex = kernel32.CreateMutexW(None, False, "PCDashboardMonitor_SensorDash")
+        last_error = kernel32.GetLastError()
+        if last_error == 183:  # ERROR_ALREADY_EXISTS
+            print("[SensorDash] Another instance is already running. Exiting.")
+            sys.exit(0)
+    except Exception:
+        pass  # Non-Windows or error — skip
+
+enforce_single_instance()
+
+# ── GPU Detection ─────────────────────────────────────────────────
 NVIDIA_AVAILABLE = False
+AMD_AVAILABLE = False
+
 try:
     import pynvml
     pynvml.nvmlInit()
     NVIDIA_AVAILABLE = True
-    print("[INFO] nvidia-ml-py (pynvml) inicializado com sucesso")
-except Exception as e:
-    print(f"[AVISO] NVIDIA ML não disponível: {e}")
+    print("[INFO] nvidia-ml-py (pynvml) initialized")
+except Exception:
+    pass
 
-# ──────────────────────────────────────────
-# Tentar pyamdgpuinfo (AMD)
-# ──────────────────────────────────────────
-AMD_AVAILABLE = False
 try:
     import pyamdgpuinfo
     if pyamdgpuinfo.detect_gpus() > 0:
         AMD_AVAILABLE = True
-        print("[INFO] pyamdgpuinfo inicializado com sucesso")
-    else:
-        print("[AVISO] pyamdgpuinfo carregado mas nenhuma GPU AMD detectada")
-except Exception as e:
-    print(f"[AVISO] pyamdgpuinfo não disponível: {e}")
+        print("[INFO] pyamdgpuinfo initialized")
+except Exception:
+    pass
 
-# ──────────────────────────────────────────
-# ──────────────────────────────────────────
-# Auxiliar: Consultar sensores via LibreHardwareMonitor / OpenHardwareMonitor WMI
-# ──────────────────────────────────────────
+# ── Sensor: LibreHardwareMonitor / OpenHardwareMonitor via WMI ───
 def read_lhm_sensors():
-    """Lê sensores de temperatura do LibreHardwareMonitor ou OpenHardwareMonitor via WMI."""
     sensors = []
     for namespace in ("root\\LibreHardwareMonitor", "root\\OpenHardwareMonitor"):
         try:
@@ -74,14 +112,10 @@ def read_lhm_sensors():
             pass
     return sensors
 
-
-# Fallback: WMI via PowerShell (Windows — qualquer vendor)
-# Captura: GPU name, AdapterRAM, e uso via DXGI
-# ──────────────────────────────────────────
+# ── GPU: WMI fallback ────────────────────────────────────────────
 def read_gpu_wmi():
-    """Lê dados básicos de GPU via PowerShell WMI — funciona para qualquer vendor no Windows."""
     try:
-        # Uso de GPU via counters de performance (GPU Engine)
+        # GPU usage via performance counters
         cmd_usage = (
             'Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue'
             ' | Select-Object -ExpandProperty CounterSamples'
@@ -96,7 +130,7 @@ def read_gpu_wmi():
         raw = result_usage.stdout.strip().replace(',', '.')
         gpu_usage = min(float(raw), 100.0) if raw else None
 
-        # Nome e VRAM via Win32_VideoController
+        # GPU name + VRAM
         cmd_info = (
             'Get-CimInstance Win32_VideoController'
             ' | Select-Object -First 1 Name, AdapterRAM'
@@ -114,26 +148,25 @@ def read_gpu_wmi():
             name = parts[0].strip() if parts[0] else ""
             vram_bytes = parts[1].strip() if len(parts) > 1 else ""
             try:
-                vram_total = round(int(vram_bytes) / 1e6, 1)  # bytes → MB
+                vram_total = round(int(vram_bytes) / 1e6, 1)
             except Exception:
                 vram_total = None
             name_lower = name.lower()
-            if "nvidia" in name_lower or "geforce" in name_lower or "rtx" in name_lower or "gtx" in name_lower:
+            if any(k in name_lower for k in ("nvidia", "geforce", "rtx", "gtx")):
                 gpu_vendor = "nvidia"
-            elif "amd" in name_lower or "radeon" in name_lower or "rx" in name_lower:
+            elif any(k in name_lower for k in ("amd", "radeon", "rx")):
                 gpu_vendor = "amd"
-            elif "intel" in name_lower or "arc" in name_lower or "iris" in name_lower:
+            elif any(k in name_lower for k in ("intel", "arc", "iris")):
                 gpu_vendor = "intel"
             else:
                 gpu_vendor = "unknown"
 
-        # Tentar obter temperatura de GPU via LibreHardwareMonitor
+        # GPU temp from LHM
         gpu_temp = None
         try:
             sensors = read_lhm_sensors()
             for s in sensors:
-                name_lower = s["name"].lower()
-                if "gpu" in name_lower:
+                if "gpu" in s["name"].lower():
                     gpu_temp = s["value"]
                     break
         except Exception:
@@ -142,19 +175,17 @@ def read_gpu_wmi():
         return {
             "gpu_usage": round(gpu_usage, 1) if gpu_usage is not None else None,
             "gpu_temp": gpu_temp,
-            "vram_used": None,  # DXGI não expõe memória usada sem DirectX
+            "vram_used": None,
             "vram_total": vram_total,
             "gpu_fan_rpm": None,
             "gpu_vendor": gpu_vendor,
         }
     except Exception as e:
-        print(f"[GPU WMI erro] {e}")
+        print(f"[GPU WMI error] {e}")
         return dict(gpu_usage=None, gpu_temp=None, vram_used=None, vram_total=None, gpu_fan_rpm=None, gpu_vendor=None)
 
-
+# ── GPU: Full read ───────────────────────────────────────────────
 def read_gpu():
-    """Detecta GPU e retorna dados. Tenta NVIDIA ML → AMD → WMI (fallback universal)."""
-    # ── NVIDIA via nvidia-ml-py ──
     if NVIDIA_AVAILABLE:
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -169,10 +200,9 @@ def read_gpu():
                 "gpu_fan_rpm": None,
                 "gpu_vendor": "nvidia",
             }
-        except Exception as e:
-            print(f"[GPU NVIDIA erro] {e}")
+        except Exception:
+            pass
 
-    # ── AMD via pyamdgpuinfo ──
     if AMD_AVAILABLE:
         try:
             gpu = pyamdgpuinfo.get_gpu(0)
@@ -184,16 +214,13 @@ def read_gpu():
                 "gpu_fan_rpm": None,
                 "gpu_vendor": "amd",
             }
-        except Exception as e:
-            print(f"[GPU AMD erro] {e}")
+        except Exception:
+            pass
 
-    # ── Fallback universal: WMI via PowerShell ──
     return read_gpu_wmi()
 
-
+# ── CPU Temperature ──────────────────────────────────────────────
 def read_cpu_temp():
-    """Tenta ler temperatura do CPU. psutil.sensors_temperatures() no Linux, LHM/OHM no Windows."""
-    # 1. Tentar psutil (comum no Linux)
     try:
         temps = psutil.sensors_temperatures()
         for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
@@ -202,33 +229,28 @@ def read_cpu_temp():
     except Exception:
         pass
 
-    # 2. Tentar LibreHardwareMonitor / OpenHardwareMonitor no Windows via WMI
     try:
         sensors = read_lhm_sensors()
-        # Procurar primeiro por "CPU Package" (temperatura geral do processador)
         for s in sensors:
-            name_lower = s["name"].lower()
-            if "cpu package" in name_lower:
+            if "cpu package" in s["name"].lower():
                 return s["value"]
-        # Se não achar "CPU Package", pegar qualquer sensor contendo "cpu"
         for s in sensors:
-            name_lower = s["name"].lower()
-            if "cpu" in name_lower:
+            if "cpu" in s["name"].lower():
                 return s["value"]
     except Exception:
         pass
 
     return None
 
-
+# ── Storage ──────────────────────────────────────────────────────
 def read_storage():
-    discos = []
+    disks = []
     for part in psutil.disk_partitions():
         if "cdrom" in part.opts or not part.fstype:
             continue
         try:
             u = psutil.disk_usage(part.mountpoint)
-            discos.append({
+            disks.append({
                 "label": part.device.replace("\\", ""),
                 "used_gb": round(u.used / 1e9, 1),
                 "total_gb": round(u.total / 1e9, 1),
@@ -236,9 +258,9 @@ def read_storage():
             })
         except PermissionError:
             pass
-    return discos
+    return disks
 
-
+# ── Collect all sensors ──────────────────────────────────────────
 def collect():
     vm = psutil.virtual_memory()
     cores = psutil.cpu_percent(interval=0.3, percpu=True)
@@ -247,7 +269,7 @@ def collect():
     return {
         "cpu_usage": round(psutil.cpu_percent(interval=0.3), 1),
         "cpu_temp": read_cpu_temp(),
-        "cpu_cores": cores,
+        "cpu_cores": [round(c, 1) for c in cores],
         "ram_used": round(vm.used / 1e9, 2),
         "ram_total": round(vm.total / 1e9, 2),
         "ram_usage": vm.percent,
@@ -257,24 +279,145 @@ def collect():
         **gpu,
     }
 
+# ── Shared state (updated by background thread) ──────────────────
+_latest_data = {"status": "initializing"}
+_data_lock = threading.Lock()
 
-def main():
-    print(f"[SensorDash] Iniciando. Enviando para Supabase a cada {INTERVAL}s...")
-    print(f"  NVIDIA ML disponível : {NVIDIA_AVAILABLE}")
-    print(f"  AMD disponível       : {AMD_AVAILABLE}")
-    print(f"  Fallback WMI         : {'sim (PowerShell)' if not NVIDIA_AVAILABLE and not AMD_AVAILABLE else 'não necessário'}")
+def sensor_loop():
+    global _latest_data
     while True:
         try:
             data = collect()
-            supabase.table("sensor_readings").insert(data).execute()
-            vendor = data.get("gpu_vendor") or "none"
-            gpu_pct = data.get("gpu_usage")
-            gpu_str = f"{gpu_pct}%" if gpu_pct is not None else "N/A"
-            print(f"[OK] {data['hostname']} | CPU {data['cpu_usage']}% | GPU {gpu_str} ({vendor})")
+            data["status"] = "online"
+            with _data_lock:
+                _latest_data = data
         except Exception as e:
-            print(f"[ERRO ao enviar] {e}")
-        time.sleep(INTERVAL)
+            with _data_lock:
+                _latest_data = {"status": "error", "error": str(e)}
+        time.sleep(COOLDOWN)
 
+# ── HTTP Handler ─────────────────────────────────────────────────
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/sensors":
+            with _data_lock:
+                data = dict(_latest_data)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            import json
+            self.wfile.write(json.dumps(data).encode())
+        elif self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            import json
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # Suppress request logs
+
+# ── Tunnel: Cloudflare (preferred) or ngrok ─────────────────────
+def start_tunnel():
+    """Start a tunnel in a background thread and save the public URL."""
+    if TUNNEL_TYPE == "cloudflare":
+        start_cloudflare_tunnel()
+    elif TUNNEL_TYPE == "ngrok":
+        start_ngrok_tunnel()
+
+def start_cloudflare_tunnel():
+    try:
+        # Check if cloudflared exists
+        cloudflared_path = os.path.join(BASE_DIR, "cloudflared.exe")
+        if not os.path.exists(cloudflared_path):
+            # Try system PATH
+            cloudflared_path = "cloudflared"
+
+        cmd = [cloudflared_path, "tunnel", "--url", f"http://localhost:{PORT}"]
+        if TUNNEL_TOKEN:
+            cmd = [cloudflared_path, "tunnel", "run", "--token", TUNNEL_TOKEN]
+
+        print(f"[Tunnel] Starting Cloudflare Tunnel...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
+        )
+
+        # Parse the tunnel URL from output
+        for line in proc.stdout:
+            line = line.strip()
+            if "trycloudflare.com" in line or "cfargotunnel.com" in line:
+                # Extract URL
+                for word in line.split():
+                    if word.startswith("https://") and ("trycloudflare.com" in word or "cfargotunnel.com" in word):
+                        url = word.rstrip(".,;")
+                        with open(TUNNEL_URL_FILE, "w") as f:
+                            f.write(url)
+                        print(f"[Tunnel] Public URL: {url}")
+                        return
+    except Exception as e:
+        print(f"[Tunnel] Cloudflare failed: {e}")
+
+def start_ngrok_tunnel():
+    try:
+        ngrok_path = os.path.join(BASE_DIR, "ngrok.exe")
+        if not os.path.exists(ngrok_path):
+            ngrok_path = "ngrok"
+
+        cmd = [ngrok_path, "http", str(PORT)]
+        if TUNNEL_TOKEN:
+            cmd = [ngrok_path, "config", "add-authtoken", TUNNEL_TOKEN]
+            subprocess.run(cmd, capture_output=True, timeout=10)
+            cmd = [ngrok_path, "http", str(PORT)]
+
+        print(f"[Tunnel] Starting ngrok...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
+        )
+
+        for line in proc.stdout:
+            line = line.strip()
+            if "ngrok-free.app" in line or "ngrok.io" in line:
+                for word in line.split():
+                    if word.startswith("https://") and "ngrok" in word:
+                        url = word.rstrip(".,;")
+                        with open(TUNNEL_URL_FILE, "w") as f:
+                            f.write(url)
+                        print(f"[Tunnel] Public URL: {url}")
+                        return
+    except Exception as e:
+        print(f"[Tunnel] ngrok failed: {e}")
+
+# ── Main ─────────────────────────────────────────────────────────
+def main():
+    print(f"[SensorDash] Starting HTTP sensor collector on port {PORT}...")
+    print(f"  NVIDIA: {NVIDIA_AVAILABLE} | AMD: {AMD_AVAILABLE}")
+    print(f"  Cooldown: {COOLDOWN}s")
+    print(f"  Tunnel: {TUNNEL_TYPE}")
+
+    # Start sensor collection thread
+    sensor_thread = threading.Thread(target=sensor_loop, daemon=True)
+    sensor_thread.start()
+
+    # Start tunnel thread
+    tunnel_thread = threading.Thread(target=start_tunnel, daemon=True)
+    tunnel_thread.start()
+
+    # Start HTTP server
+    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"[SensorDash] Running at http://localhost:{PORT}/api/sensors")
+    print(f"[SensorDash] Press Ctrl+C to stop.")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[SensorDash] Shutting down...")
+        server.shutdown()
 
 if __name__ == "__main__":
     main()

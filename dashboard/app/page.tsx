@@ -6,10 +6,11 @@ import GaugeCard from "../components/GaugeCard";
 import BarCard from "../components/BarCard";
 import StorageCard from "../components/StorageCard";
 import CpuCoresCard from "../components/CpuCoresCard";
+import TempCard from "../components/TempCard";
 
 interface SensorData {
-  id: number;
-  recorded_at: string;
+  status: string;
+  error?: string;
   cpu_usage: number | null;
   cpu_temp: number | null;
   cpu_cores: number[] | null;
@@ -25,7 +26,6 @@ interface SensorData {
   storage: { label: string; used_gb: number; total_gb: number; usage_percent: number }[] | null;
   uptime_sec: number | null;
   hostname: string | null;
-  age_seconds: number;
 }
 
 function formatUptime(seconds: number | null): string {
@@ -33,7 +33,7 @@ function formatUptime(seconds: number | null): string {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  const parts = [];
+  const parts: string[] = [];
   if (d > 0) parts.push(`${d}d`);
   if (h > 0) parts.push(`${h}h`);
   parts.push(`${m}m`);
@@ -56,7 +56,12 @@ export default function Home() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch("/api/sensors", { cache: "no-store" });
+      // In production (Vercel), fetch directly from the tunneled API URL
+      // In dev, use the local proxy route
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const url = apiUrl ? `${apiUrl}/api/sensors` : "/api/sensors";
+
+      const res = await fetch(url, { cache: "no-store" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         setError(body.error || `Erro ${res.status}`);
@@ -109,7 +114,6 @@ export default function Home() {
             alignItems: "center",
           }}
         >
-          {/* Logo/Title */}
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
             <div
               style={{
@@ -152,10 +156,9 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Status */}
           <StatusBadge
-            ageSeconds={data ? data.age_seconds : null}
-            lastUpdate={data?.recorded_at ?? null}
+            online={data?.status === "online"}
+            lastUpdate={lastFetch?.toISOString() ?? null}
             hostname={data?.hostname}
           />
         </div>
@@ -210,7 +213,7 @@ export default function Home() {
             </div>
             <div style={{ fontSize: "13px", color: "#666" }}>{error}</div>
             <div style={{ fontSize: "12px", color: "#444", marginTop: "8px" }}>
-              Verifique se o server.py está rodando e enviando dados
+              Verifique se o backend está rodando e o túnel ativo
             </div>
           </div>
         )}
@@ -265,7 +268,7 @@ export default function Home() {
               )}
             </div>
 
-            {/* CPU + GPU Gauges — side by side on wider screens */}
+            {/* CPU + GPU Gauges */}
             <div
               style={{
                 display: "grid",
@@ -291,6 +294,14 @@ export default function Home() {
                 subtitle={data.gpu_vendor ? `(${data.gpu_vendor.toUpperCase()})` : undefined}
               />
             </div>
+
+            {/* Temperature Card — CPU & GPU side by side */}
+            <TempCard
+              cpuTemp={data.cpu_temp}
+              gpuTemp={data.gpu_temp}
+              cpuLabel="CPU"
+              gpuLabel={data.gpu_vendor ? data.gpu_vendor.toUpperCase() : "GPU"}
+            />
 
             {/* RAM */}
             <BarCard

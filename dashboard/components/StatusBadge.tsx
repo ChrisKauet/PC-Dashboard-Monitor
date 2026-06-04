@@ -1,13 +1,13 @@
 "use client";
 
 interface StatusBadgeProps {
-  ageSeconds: number | null;
+  online: boolean;
   lastUpdate: string | null;
   hostname?: string | null;
 }
 
-export default function StatusBadge({ ageSeconds, lastUpdate, hostname }: StatusBadgeProps) {
-  if (ageSeconds === null) {
+export default function StatusBadge({ online, lastUpdate, hostname }: StatusBadgeProps) {
+  if (online === false && !lastUpdate) {
     return (
       <div
         style={{
@@ -37,15 +37,13 @@ export default function StatusBadge({ ageSeconds, lastUpdate, hostname }: Status
     );
   }
 
-  const isOnline = ageSeconds <= 15;
-  const color = isOnline ? "#22c55e" : "#ef4444";
-  const label = isOnline ? "Ao Vivo" : "PC Offline";
-  const emoji = isOnline ? "🟢" : "🔴";
+  const color = online ? "#22c55e" : "#ef4444";
+  const label = online ? "Ao Vivo" : "Offline";
+  const emoji = online ? "🟢" : "🔴";
 
-  const formatAge = (s: number) => {
-    if (s < 60) return `${Math.round(s)}s atrás`;
-    if (s < 3600) return `${Math.round(s / 60)}min atrás`;
-    return `${Math.round(s / 3600)}h atrás`;
+  const formatTime = (iso: string) => {
+    const d = new Date(iso);
+    return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   };
 
   return (
@@ -73,7 +71,7 @@ export default function StatusBadge({ ageSeconds, lastUpdate, hostname }: Status
             background: color,
             display: "inline-block",
             boxShadow: `0 0 8px ${color}`,
-            animation: isOnline ? "pulse-dot 1.5s ease-in-out infinite" : "none",
+            animation: online ? "pulse-dot 1.5s ease-in-out infinite" : "none",
           }}
           className="animate-pulse-dot"
         />
@@ -81,7 +79,7 @@ export default function StatusBadge({ ageSeconds, lastUpdate, hostname }: Status
       </div>
       {lastUpdate && (
         <span style={{ fontSize: "11px", color: "#555", fontFamily: "'Share Tech Mono', monospace" }}>
-          {hostname ? `${hostname} · ` : ""}{formatAge(ageSeconds)}
+          {hostname ? `${hostname} · ` : ""}{formatTime(lastUpdate)}
         </span>
       )}
     </div>

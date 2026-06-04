@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "cd dashboard && npm run build",
+  "outputDirectory": "dashboard/.next",
+  "installCommand": "cd dashboard && npm install",
+  "rewrites": [
+    { "source": "/api/sensors", "destination": "/api/sensors" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" }
+      ]
+    }
+  ]
+}

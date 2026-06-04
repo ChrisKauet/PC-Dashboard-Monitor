@@ -1,23 +1,34 @@
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
+import { NextResponse } from "next/server"
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
+/**
+ * Proxy route: forwards to the local sensor collector.
+ * In production (Vercel), the frontend fetches directly from NEXT_PUBLIC_API_URL.
+ * This route is kept for local dev convenience.
+ */
+export const dynamic = "force-dynamic"
 
 export async function GET() {
-  const { data, error } = await supabase
-    .from('sensor_readings')
-    .select('*')
-    .order('recorded_at', { ascending: false })
-    .limit(1)
-    .single()
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  try {
+    const res = await fetch(`${apiUrl}/api/sensors`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000),
+    })
 
-  // Calcular idade do dado para indicar se o PC está online
-  const ageSeconds = (Date.now() - new Date(data.recorded_at).getTime()) / 1000
+    if (!res.ok) {
+      return NextResponse.json(
+        { error: `Backend returned ${res.status}` },
+        { status: 502 }
+      )
+    }
 
-  return NextResponse.json({ ...data, age_seconds: ageSeconds })
+    const data = await res.json()
+    return NextResponse.json(data)
+  } catch (error) {
+    return NextResponse.json(
+      { error: "Sensor backend unreachable. Is server.py running?" },
+      { status: 503 }
+    )
+  }
 }
