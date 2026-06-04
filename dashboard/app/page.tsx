@@ -56,12 +56,8 @@ export default function Home() {
 
   const fetchData = useCallback(async () => {
     try {
-      // In production (Vercel), fetch directly from the tunneled API URL
-      // In dev, use the local proxy route
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const url = apiUrl ? `${apiUrl}/api/sensors` : "/api/sensors";
-
-      const res = await fetch(url, { cache: "no-store" });
+      // Always use the local API route (which proxies to Supabase)
+      const res = await fetch("/api/sensors", { cache: "no-store" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         setError(body.error || `Erro ${res.status}`);

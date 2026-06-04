@@ -220,22 +220,43 @@ def read_gpu():
 
 # ── CPU Temperature ──────────────────────────────────────────────
 def read_cpu_temp():
+    # Method 1: psutil (most reliable, works with LibreHardwareMonitor driver)
     try:
         temps = psutil.sensors_temperatures()
-        for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
+        for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz", "zenpower"):
             if key in temps and temps[key]:
                 return round(temps[key][0].current, 1)
     except Exception:
         pass
 
+    # Method 2: LibreHardwareMonitor / OpenHardwareMonitor via WMI
     try:
         sensors = read_lhm_sensors()
         for s in sensors:
             if "cpu package" in s["name"].lower():
                 return s["value"]
         for s in sensors:
-            if "cpu" in s["name"].lower():
+            if "cpu" in s["name"].lower() and "temp" in s["name"].lower():
                 return s["value"]
+    except Exception:
+        pass
+
+    # Method 3: WMI MSAcpi_ThermalZoneTemperature
+    try:
+        cmd = (
+            'Get-CimInstance -Namespace "root/wmi" -ClassName "MSAcpi_ThermalZoneTemperature" -ErrorAction SilentlyContinue'
+            ' | Select-Object -ExpandProperty CurrentTemperature'
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=4
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            raw = result.stdout.strip().splitlines()[0].strip()
+            kelvin_tenths = int(raw)
+            celsius = round(kelvin_tenths / 10.0 - 273.15, 1)
+            if -50 < celsius < 150:
+                return celsius
     except Exception:
         pass
 
