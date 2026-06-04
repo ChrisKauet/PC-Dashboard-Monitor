@@ -37,6 +37,44 @@ except Exception as e:
     print(f"[AVISO] pyamdgpuinfo não disponível: {e}")
 
 # ──────────────────────────────────────────
+# ──────────────────────────────────────────
+# Auxiliar: Consultar sensores via LibreHardwareMonitor / OpenHardwareMonitor WMI
+# ──────────────────────────────────────────
+def read_lhm_sensors():
+    """Lê sensores de temperatura do LibreHardwareMonitor ou OpenHardwareMonitor via WMI."""
+    sensors = []
+    for namespace in ("root\\LibreHardwareMonitor", "root\\OpenHardwareMonitor"):
+        try:
+            cmd = (
+                'Get-CimInstance -Namespace "' + namespace + '" -ClassName "Sensor" -ErrorAction SilentlyContinue'
+                ' | Where-Object { $_.SensorType -eq "Temperature" }'
+                ' | Select-Object Name, Value'
+                ' | ConvertTo-Csv -NoTypeInformation'
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                capture_output=True, text=True, timeout=4
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().splitlines()
+                if len(lines) >= 2:
+                    for line in lines[1:]:
+                        parts = line.replace('"', '').split(',')
+                        if len(parts) >= 2:
+                            name = parts[0].strip()
+                            val_str = parts[1].strip().replace(',', '.')
+                            try:
+                                val = float(val_str)
+                                sensors.append({"name": name, "value": val})
+                            except ValueError:
+                                pass
+                    if sensors:
+                        break
+        except Exception:
+            pass
+    return sensors
+
+
 # Fallback: WMI via PowerShell (Windows — qualquer vendor)
 # Captura: GPU name, AdapterRAM, e uso via DXGI
 # ──────────────────────────────────────────
@@ -89,9 +127,21 @@ def read_gpu_wmi():
             else:
                 gpu_vendor = "unknown"
 
+        # Tentar obter temperatura de GPU via LibreHardwareMonitor
+        gpu_temp = None
+        try:
+            sensors = read_lhm_sensors()
+            for s in sensors:
+                name_lower = s["name"].lower()
+                if "gpu" in name_lower:
+                    gpu_temp = s["value"]
+                    break
+        except Exception:
+            pass
+
         return {
             "gpu_usage": round(gpu_usage, 1) if gpu_usage is not None else None,
-            "gpu_temp": None,   # WMI não expõe temperatura facilmente
+            "gpu_temp": gpu_temp,
             "vram_used": None,  # DXGI não expõe memória usada sem DirectX
             "vram_total": vram_total,
             "gpu_fan_rpm": None,
@@ -142,7 +192,8 @@ def read_gpu():
 
 
 def read_cpu_temp():
-    """Tenta ler temperatura do CPU. psutil.sensors_temperatures() geralmente não funciona no Windows."""
+    """Tenta ler temperatura do CPU. psutil.sensors_temperatures() no Linux, LHM/OHM no Windows."""
+    # 1. Tentar psutil (comum no Linux)
     try:
         temps = psutil.sensors_temperatures()
         for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
@@ -150,6 +201,23 @@ def read_cpu_temp():
                 return round(temps[key][0].current, 1)
     except Exception:
         pass
+
+    # 2. Tentar LibreHardwareMonitor / OpenHardwareMonitor no Windows via WMI
+    try:
+        sensors = read_lhm_sensors()
+        # Procurar primeiro por "CPU Package" (temperatura geral do processador)
+        for s in sensors:
+            name_lower = s["name"].lower()
+            if "cpu package" in name_lower:
+                return s["value"]
+        # Se não achar "CPU Package", pegar qualquer sensor contendo "cpu"
+        for s in sensors:
+            name_lower = s["name"].lower()
+            if "cpu" in name_lower:
+                return s["value"]
+    except Exception:
+        pass
+
     return None
 
 
