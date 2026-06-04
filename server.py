@@ -1,12 +1,13 @@
 """
 PC Dashboard Monitor — Backend Collector
-No database. No Supabase. Pure Flask API serving real-time sensor data.
-Single-instance enforcement. 1-second cooldown between readings.
+Reads local sensor data and pushes to Supabase every N seconds.
+Also serves a local HTTP API for direct access.
 """
 
 import os
 import sys
 import time
+import json
 import socket
 import subprocess
 import threading
@@ -37,14 +38,15 @@ load_env()
 
 # ── Config ────────────────────────────────────────────────────────
 PORT = int(os.getenv("SENSOR_PORT", 8080))
-COOLDOWN = float(os.getenv("SENSOR_COOLDOWN", 1.0))
-TUNNEL_TYPE = os.getenv("TUNNEL_TYPE", "cloudflare")  # "cloudflare" or "ngrok"
-TUNNEL_TOKEN = os.getenv("TUNNEL_TOKEN", "")
-TUNNEL_URL_FILE = os.path.join(BASE_DIR, "tunnel_url.txt")
+COOLDOWN = float(os.getenv("SENSOR_COOLDOWN", 5.0))
+PUSH_INTERVAL = float(os.getenv("PUSH_INTERVAL", 5.0))
+
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")  # service_role key (backend only)
 
 # ── Single-instance enforcement ───────────────────────────────────
 def enforce_single_instance():
-    """Use a named mutex to ensure only one instance runs."""
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32
@@ -54,7 +56,7 @@ def enforce_single_instance():
             print("[SensorDash] Another instance is already running. Exiting.")
             sys.exit(0)
     except Exception:
-        pass  # Non-Windows or error — skip
+        pass
 
 enforce_single_instance()
 
@@ -115,7 +117,6 @@ def read_lhm_sensors():
 # ── GPU: WMI fallback ────────────────────────────────────────────
 def read_gpu_wmi():
     try:
-        # GPU usage via performance counters
         cmd_usage = (
             'Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue'
             ' | Select-Object -ExpandProperty CounterSamples'
@@ -130,7 +131,6 @@ def read_gpu_wmi():
         raw = result_usage.stdout.strip().replace(',', '.')
         gpu_usage = min(float(raw), 100.0) if raw else None
 
-        # GPU name + VRAM
         cmd_info = (
             'Get-CimInstance Win32_VideoController'
             ' | Select-Object -First 1 Name, AdapterRAM'
@@ -161,7 +161,6 @@ def read_gpu_wmi():
             else:
                 gpu_vendor = "unknown"
 
-        # GPU temp from LHM
         gpu_temp = None
         try:
             sensors = read_lhm_sensors()
@@ -279,7 +278,48 @@ def collect():
         **gpu,
     }
 
-# ── Shared state (updated by background thread) ──────────────────
+# ── Supabase push ────────────────────────────────────────────────
+_supabase_client = None
+
+def get_supabase_client():
+    global _supabase_client
+    if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
+        try:
+            from supabase import create_client
+            _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+            print("[Supabase] Client initialized")
+        except Exception as e:
+            print(f"[Supabase] Init error: {e}")
+    return _supabase_client
+
+def push_to_supabase(data):
+    client = get_supabase_client()
+    if not client:
+        return
+
+    try:
+        record = {
+            "cpu_usage": data.get("cpu_usage"),
+            "cpu_temp": data.get("cpu_temp"),
+            "cpu_cores": json.dumps(data.get("cpu_cores", [])),
+            "gpu_usage": data.get("gpu_usage"),
+            "gpu_temp": data.get("gpu_temp"),
+            "vram_used": data.get("vram_used"),
+            "vram_total": data.get("vram_total"),
+            "gpu_fan_rpm": data.get("gpu_fan_rpm"),
+            "ram_used": data.get("ram_used"),
+            "ram_total": data.get("ram_total"),
+            "ram_usage": data.get("ram_usage"),
+            "storage": json.dumps(data.get("storage", [])),
+            "uptime_sec": data.get("uptime_sec"),
+            "hostname": data.get("hostname"),
+            "gpu_vendor": data.get("gpu_vendor"),
+        }
+        client.table("sensor_readings").insert(record).execute()
+    except Exception as e:
+        print(f"[Supabase] Push error: {e}")
+
+# ── Shared state ─────────────────────────────────────────────────
 _latest_data = {"status": "initializing"}
 _data_lock = threading.Lock()
 
@@ -291,6 +331,8 @@ def sensor_loop():
             data["status"] = "online"
             with _data_lock:
                 _latest_data = data
+            # Push to Supabase
+            push_to_supabase(data)
         except Exception as e:
             with _data_lock:
                 _latest_data = {"status": "error", "error": str(e)}
@@ -306,107 +348,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            import json
             self.wfile.write(json.dumps(data).encode())
         elif self.path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            import json
             self.wfile.write(json.dumps({"status": "ok"}).encode())
         else:
             self.send_response(404)
             self.end_headers()
 
     def log_message(self, format, *args):
-        pass  # Suppress request logs
-
-# ── Tunnel: Cloudflare (preferred) or ngrok ─────────────────────
-def start_tunnel():
-    """Start a tunnel in a background thread and save the public URL."""
-    if TUNNEL_TYPE == "cloudflare":
-        start_cloudflare_tunnel()
-    elif TUNNEL_TYPE == "ngrok":
-        start_ngrok_tunnel()
-
-def start_cloudflare_tunnel():
-    try:
-        # Check if cloudflared exists
-        cloudflared_path = os.path.join(BASE_DIR, "cloudflared.exe")
-        if not os.path.exists(cloudflared_path):
-            # Try system PATH
-            cloudflared_path = "cloudflared"
-
-        cmd = [cloudflared_path, "tunnel", "--url", f"http://localhost:{PORT}"]
-        if TUNNEL_TOKEN:
-            cmd = [cloudflared_path, "tunnel", "run", "--token", TUNNEL_TOKEN]
-
-        print(f"[Tunnel] Starting Cloudflare Tunnel...")
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1
-        )
-
-        # Parse the tunnel URL from output
-        for line in proc.stdout:
-            line = line.strip()
-            if "trycloudflare.com" in line or "cfargotunnel.com" in line:
-                # Extract URL
-                for word in line.split():
-                    if word.startswith("https://") and ("trycloudflare.com" in word or "cfargotunnel.com" in word):
-                        url = word.rstrip(".,;")
-                        with open(TUNNEL_URL_FILE, "w") as f:
-                            f.write(url)
-                        print(f"[Tunnel] Public URL: {url}")
-                        return
-    except Exception as e:
-        print(f"[Tunnel] Cloudflare failed: {e}")
-
-def start_ngrok_tunnel():
-    try:
-        ngrok_path = os.path.join(BASE_DIR, "ngrok.exe")
-        if not os.path.exists(ngrok_path):
-            ngrok_path = "ngrok"
-
-        cmd = [ngrok_path, "http", str(PORT)]
-        if TUNNEL_TOKEN:
-            cmd = [ngrok_path, "config", "add-authtoken", TUNNEL_TOKEN]
-            subprocess.run(cmd, capture_output=True, timeout=10)
-            cmd = [ngrok_path, "http", str(PORT)]
-
-        print(f"[Tunnel] Starting ngrok...")
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1
-        )
-
-        for line in proc.stdout:
-            line = line.strip()
-            if "ngrok-free.app" in line or "ngrok.io" in line:
-                for word in line.split():
-                    if word.startswith("https://") and "ngrok" in word:
-                        url = word.rstrip(".,;")
-                        with open(TUNNEL_URL_FILE, "w") as f:
-                            f.write(url)
-                        print(f"[Tunnel] Public URL: {url}")
-                        return
-    except Exception as e:
-        print(f"[Tunnel] ngrok failed: {e}")
+        pass
 
 # ── Main ─────────────────────────────────────────────────────────
 def main():
     print(f"[SensorDash] Starting HTTP sensor collector on port {PORT}...")
     print(f"  NVIDIA: {NVIDIA_AVAILABLE} | AMD: {AMD_AVAILABLE}")
     print(f"  Cooldown: {COOLDOWN}s")
-    print(f"  Tunnel: {TUNNEL_TYPE}")
+    print(f"  Supabase: {'enabled' if SUPABASE_URL else 'disabled'}")
 
     # Start sensor collection thread
     sensor_thread = threading.Thread(target=sensor_loop, daemon=True)
     sensor_thread.start()
-
-    # Start tunnel thread
-    tunnel_thread = threading.Thread(target=start_tunnel, daemon=True)
-    tunnel_thread.start()
 
     # Start HTTP server
     server = HTTPServer(("0.0.0.0", PORT), Handler)

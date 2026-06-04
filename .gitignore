@@ -2,6 +2,9 @@
 .env
 .env.local
 *.env
+.supabase_key
+.supabase_service_key
+keys.txt
 
 # Python
 __pycache__/
