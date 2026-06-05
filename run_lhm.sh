@@ -1,0 +1,1 @@
+cd /f/VibeCoding/PC-Dashboard-Monitor && python start_lhm.py

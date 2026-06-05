@@ -1,0 +1,279 @@
+================================================================================
+PROMPT: Frontend Swap — Next.js Gauges → SysMonitor HTML Design
+================================================================================
+
+OBJECTIVE:
+Replace the entire current Next.js frontend (dashboard/) with a faithful 
+React/TS implementation of the "SysMonitor" HTML design 
+(pc-metrics-dashboard.html), keeping the existing Supabase-based API layer 
+and Vercel deploy intact. The result must look identical to the HTML mockup 
+but be a proper Next.js 16 + React 19 + TypeScript app deployable on Vercel.
+
+================================================================================
+CURRENT STATE (source of truth):
+================================================================================
+
+- dashboard/app/page.tsx — Supabase data fetch, renders GaugeCard, BarCard, 
+  StorageCard, CpuCoresCard, TempCard in a dark theme (#0d0d0d bg)
+- dashboard/components/ — GaugeCard, BarCard, CpuCoresCard, StorageCard, 
+  StatusBadge, TempCard
+- dashboard/app/api/sensors/route.ts — reads from Supabase REST API
+- dashboard/package.json — deps: @supabase/supabase-js, @tabler/icons-react, 
+  chart.js, next (16.2.7), react (19.2.4)
+- dashboard/vercel.json — Nextjs framework, CORS headers on /api/*
+
+================================================================================
+TARGET DESIGN (pc-metrics-dashboard.html):
+================================================================================
+
+A clean, light/dark adaptive dashboard with these sections (top to bottom):
+
+1. TOPBAR
+   - SYS.MONITOR logo (green dot accent on the dot in "SYS.")
+   - Hostname display (right side)
+   - Animated pulsing "LIVE" badge (green dot + "LIVE" text, green border)
+
+2. METRICS GRID (4 columns)
+   4 cards side by side:
+   - CPU    — color #1D9E75 (green),  icon: ti-cpu
+   - RAM    — color #534AB7 (purple), icon: ti-database
+   - GPU    — color #D85A30 (orange), icon: ti-device-desktop
+   - Disco  — color #BA7517 (amber),  icon: ti-server
+
+   Each card contains:
+   - Label with Tabler icon (uppercase, letter-spaced)
+   - Large mono value + smaller unit (e.g. "67" + "%")
+   - Subtitle with detail (e.g. "Intel Core i9 · 16 núcleos")
+   - Thin color-coded progress bar (3px height, rounded)
+   - 2px top accent line in card's color
+
+3. MID GRID (2fr + 1fr)
+
+   Left card — "Histórico — CPU & RAM":
+   - Chart.js line chart, 30 data points history
+   - Green (#1D9E75) line for CPU, purple (#534AB7) for RAM
+   - Filled area under lines
+   - No x-axis labels, y-axis 0-100%
+   - Legend: colored squares + labels
+   - "Tempo real" green badge
+
+   Right card — "Sistema" info list:
+   - Uptime (icon: ti-clock)
+   - Download (icon: ti-arrow-down) — MB/s
+   - Upload (icon: ti-arrow-up) — MB/s
+   - Energia (icon: ti-bolt) — Watts
+   - Processos (icon: ti-temperature) — count
+   - Each row: icon + label on left, mono value on right
+   - "Info" blue badge
+
+4. BOTTOM GRID (1fr + 1fr)
+
+   Left card — "Top processos":
+   - Header row: "Processo" | "CPU" | "MEM"
+   - 5 rows, each with: colored dot, process name, CPU%, MEM
+   - "CPU · MEM" orange badge
+
+   Right card — "Temperaturas":
+   - 2×2 grid of temperature items:
+     - CPU Package
+     - GPU Core
+     - Disco SSD
+     - Placa-mãe
+   - Each: large mono value (°C) + small label below
+   - Color thresholds:
+     - t-ok   (< 68°C)  → green  (#1D9E75 light / #5DCAA5 dark)
+     - t-warm (68-79°C) → amber  (#BA7517 light / #FAC775 dark)
+     - t-hot  (≥ 80°C)  → orange (#D85A30 light / #F0997B dark)
+   - "Monitorando" orange badge
+
+5. LIGHT/DARK AUTO via prefers-color-scheme media query
+
+6. RESPONSIVE:
+   - 4 → 2 columns at ≤ 700px
+   - Mid grid and bottom grid stack vertically at ≤ 700px
+   - Hostname hidden on mobile (≤ 700px)
+   - Metric values shrink at ≤ 420px
+
+================================================================================
+COLOR PALETTE (from HTML):
+================================================================================
+
+LIGHT THEME:
+  - bg-page:    #F2F0EB
+  - bg-card:    #FFFFFF
+  - bg-surface: #F7F5F2
+  - border:     rgba(0,0,0,0.08)
+  - border-md:  rgba(0,0,0,0.14)
+  - text-primary:   #1A1A1A
+  - text-secondary: #6B6B6B
+  - text-muted:     #A0A0A0
+
+DARK THEME:
+  - bg-page:    #0D0E12
+  - bg-card:    #161820
+  - bg-surface: #1E2028
+  - border:     rgba(255,255,255,0.07)
+  - border-md:  rgba(255,255,255,0.12)
+  - text-primary:   #E8E8EE
+  - text-secondary: #8B8B99
+  - text-muted:     #555566
+
+ACCENT COLORS:
+  - green:  #1D9E75 (bg: #E1F5EE light / rgba(29,158,117,0.15) dark, text: #0F6E56 / #5DCAA5)
+  - purple: #534AB7 (bg: #EEEDFE light / rgba(83,74,183,0.15) dark, text: #3C3489 / #AFA9EC)
+  - orange: #D85A30 (bg: #FAECE7 light / rgba(216,90,48,0.15) dark, text: #993C1D / #F0997B)
+  - amber:  #BA7517 (bg: #FAEEDA light / rgba(186,117,23,0.15) dark, text: #854F0B / #FAC775)
+  - blue:   #185FA5 (bg: #E6F1FB light / rgba(24,95,165,0.15) dark, text: #0C447C / #85B7EB)
+
+FONTS:
+  - IBM Plex Mono — values, numbers, monospace text
+  - DM Sans — UI labels, titles, body text
+
+================================================================================
+DATA SOURCE MAPPING (Supabase API → UI):
+================================================================================
+
+Existing fields:
+  - cpu_usage          → CPU card value (%) + chart
+  - cpu_temp           → Temp grid CPU Package (°C)
+  - ram_usage          → RAM card percentage
+  - ram_used           → RAM card value (GB)
+  - ram_total          → RAM card subtitle "de XGB"
+  - gpu_usage          → GPU card value (%)
+  - gpu_temp           → Temp grid GPU Core (°C)
+  - vram_used          → GPU subtitle
+  - vram_total         → GPU subtitle
+  - storage[0]         → Disk card (used GB, total GB, percent)
+  - uptime_sec         → Uptime display (convert to Xh Xm)
+  - hostname           → Topbar hostname display
+
+NEW fields needed from backend (show "—" if null):
+  - dl_speed           → Download (MB/s)
+  - ul_speed           → Upload (MB/s)
+  - watts              → Energia (W)
+  - process_count      → Processos (count)
+  - processes[]        → Top processos list [{ name, cpu_percent, mem_mb }]
+  - temp_ssd           → Temp grid Disco SSD (°C)
+  - temp_mb            → Temp grid Placa-mãe (°C)
+
+================================================================================
+FILES TO DELETE:
+================================================================================
+
+- dashboard/components/GaugeCard.tsx
+- dashboard/components/BarCard.tsx
+- dashboard/components/CpuCoresCard.tsx
+- dashboard/components/StorageCard.tsx
+- dashboard/components/TempCard.tsx
+- dashboard/components/StatusBadge.tsx
+
+================================================================================
+FILES TO CREATE (component breakdown):
+================================================================================
+
+1. components/Topbar.tsx
+   - Logo "SYS.MONITOR" with green dot
+   - Hostname display
+   - Animated LIVE badge (pulsing green dot + "LIVE" text)
+
+2. components/MetricCard.tsx
+   - Single reusable metric card
+   - Props: label, icon (Tabler icon name), value, unit, subtitle, 
+     percent, color, colorClass (cpu/ram/gpu/disk)
+   - Renders: label row, value row, subtitle, progress bar, top accent line
+
+3. components/MetricsGrid.tsx
+   - 4-column grid layout
+   - Renders 4 MetricCard instances (CPU, RAM, GPU, Disk)
+   - Responsive: 4→2 cols at ≤700px
+
+4. components/InfoList.tsx
+   - Sistema info list card
+   - Props: uptime, dlSpeed, ulSpeed, watts, processCount
+   - Each row: Tabler icon + label + mono value
+   - "Info" blue badge
+
+5. components/TempGrid.tsx
+   - 2×2 temperature grid card
+   - Props: cpuTemp, gpuTemp, ssdTemp, mbTemp
+   - Color class logic: <68=t-ok, 68-79=t-warm, ≥80=t-hot
+   - "Monitorando" orange badge
+
+6. components/ProcessList.tsx
+   - Top processes table card
+   - Props: processes[] (name, cpu, mem)
+   - Colored dots per process
+   - "CPU · MEM" orange badge
+
+7. components/MidGrid.tsx
+   - 2fr+1fr grid: Chart.js historical chart + InfoList
+   - Chart: 30pts CPU+RAM lines, filled, no x labels, y 0-100%
+   - Props: cpuHistory[], ramHistory[], systemInfo{}
+
+8. components/BottomGrid.tsx
+   - 1fr+1fr grid: ProcessList + TempGrid
+   - Props: processes[], temps{}
+
+================================================================================
+FILES TO MODIFY:
+================================================================================
+
+1. app/page.tsx
+   - Remove all current component imports and layout
+   - Render: Topbar → MetricsGrid → MidGrid → BottomGrid
+   - Keep Supabase data fetching logic (adapt field mapping)
+   - Keep 5s polling interval
+   - Keep error/loading states
+   - Add chart history state (30pts rolling buffer for CPU/RAM)
+
+2. app/globals.css
+   - Add CSS custom properties for light and dark themes (from HTML)
+   - Add @media (prefers-color-scheme: dark) dark theme overrides
+   - Add utility classes: .card, .badge, .badge-green, .badge-blue, 
+     .badge-orange, .bar-track, .bar-fill, .temp-val, .t-ok, .t-warm, 
+     .t-hot, .metric-card, .mc-cpu, .mc-ram, .mc-gpu, .mc-disk, etc.
+   - Add keyframe animation: pulse (for LIVE dot)
+   - Add responsive breakpoints: 700px, 420px
+   - Import IBM Plex Mono and DM Sans from Google Fonts
+
+3. app/layout.tsx
+   - Add IBM Plex Mono font import
+   - Add DM Sans font import
+   - Keep existing metadata
+
+4. package.json
+   - Keep all existing deps: @supabase/supabase-js, @tabler/icons-react, 
+     chart.js, next, react, react-dom
+   - No new packages needed
+
+================================================================================
+CONSTRAINTS:
+================================================================================
+
+- Must deploy on Vercel (Next.js 16, vercel.json stays as-is)
+- Must read from existing Supabase API route (/api/sensors)
+- No new npm packages — use existing dependencies only
+- Chart.js for the historical chart (already in deps)
+- Tabler icons via @tabler/icons-react (already in deps)
+- Polling interval: 5 seconds (keep existing)
+- All existing error/loading states must be preserved
+- Dark mode must work with full prefers-color-scheme support
+- Mobile responsive (breakpoints at 700px and 420px from HTML)
+- All inline styles from HTML must be converted to proper CSS/Tailwind or 
+  CSS-in-JS within Next.js conventions
+- TypeScript strict mode — no any types
+
+================================================================================
+OUTPUT:
+================================================================================
+
+1. Updated app/page.tsx
+2. Updated app/globals.css (with light/dark CSS variables from HTML)
+3. Updated app/layout.tsx (add IBM Plex Mono + DM Sans)
+4. New components: Topbar, MetricCard, MetricsGrid, InfoList, TempGrid, 
+   ProcessList, MidGrid, BottomGrid
+5. Deleted: GaugeCard, BarCard, CpuCoresCard, StorageCard, TempCard, 
+   StatusBadge
+6. Updated package.json (remove unused deps if any)
+7. Brief summary of what changed and any backend fields needed
+================================================================================
