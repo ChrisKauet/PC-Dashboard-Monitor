@@ -44,7 +44,7 @@ function formatUptime(seconds: number | null): string {
 
 export default function MidGrid({
   cpuHistory, ramHistory,
-  uptime: uptimeSec, dlSpeed, ulSpeed, watts, processCount,
+  uptime, dlSpeed, ulSpeed, watts, processCount,
 }: MidGridProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<ChartJS | null>(null);
@@ -157,7 +157,7 @@ export default function MidGrid({
         </div>
       </div>
       <InfoList
-        uptime={formatUptime(uptimeSec)}
+        uptime={uptime}
         dlSpeed={dlSpeed}
         ulSpeed={ulSpeed}
         watts={watts}

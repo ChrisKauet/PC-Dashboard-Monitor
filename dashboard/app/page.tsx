@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import Topbar from "./components/Topbar";
-import MetricsGrid from "./components/MetricsGrid";
-import MidGrid from "./components/MidGrid";
-import BottomGrid from "./components/BottomGrid";
+import Topbar from "../components/Topbar";
+import MetricsGrid from "../components/MetricsGrid";
+import MidGrid from "../components/MidGrid";
+import BottomGrid from "../components/BottomGrid";
 
 interface SensorData {
   status: string;
@@ -35,6 +35,13 @@ interface SensorData {
 }
 
 const HISTORY_LENGTH = 30;
+
+function formatUptime(seconds: number | null): string {
+  if (!seconds) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
 
 function getCpuModel(cores: number[] | null): string | null {
   if (!cores) return null;
@@ -152,7 +159,7 @@ export default function Home() {
           <MidGrid
             cpuHistory={cpuHistoryRef.current}
             ramHistory={ramHistoryRef.current}
-            uptime={data.uptime_sec}
+            uptime={formatUptime(data.uptime_sec)}
             dlSpeed={data.dl_speed ?? null}
             ulSpeed={data.ul_speed ?? null}
             watts={data.watts ?? null}
