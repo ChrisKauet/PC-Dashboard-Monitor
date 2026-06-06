@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PC Dashboard Monitor — Sensores ao Vivo",
-  description: "Monitore CPU, GPU, RAM e armazenamento do seu PC em tempo real de qualquer lugar.",
+  title: "SYS.MONITOR — PC Dashboard",
+  description: "Monitore CPU, GPU, RAM e armazenamento do seu PC em tempo real.",
 };
 
 export default function RootLayout({
