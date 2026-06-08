@@ -235,16 +235,16 @@ def read_gpu_wmi():
         cmd_usage = (
             'Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue'
             ' | Select-Object -ExpandProperty CounterSamples'
-            ' | Where-Object { $_.CookedValue -gt 0 }'
-            ' | Measure-Object CookedValue -Sum'
-            ' | Select-Object -ExpandProperty Sum'
+            ' | Where-Object { $_.CookedValue -gt 0 -and $_.Path -match "engtype_3d" }'
+            ' | Measure-Object CookedValue -Average'
+            ' | Select-Object -ExpandProperty Average'
         )
         result_usage = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd_usage],
             capture_output=True, text=True, timeout=4
         )
         raw = result_usage.stdout.strip().replace(',', '.')
-        gpu_usage = min(float(raw), 100.0) if raw else None
+        gpu_usage = round(float(raw), 1) if raw else None
 
         cmd_info = (
             'Get-CimInstance Win32_VideoController'
