@@ -2,3 +2,5 @@ psutil
 nvidia-ml-py
 supabase
 python-dotenv
+pystray
+pillow
