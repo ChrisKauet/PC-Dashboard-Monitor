@@ -21,6 +21,26 @@ except ImportError:
 
 import psutil
 
+# ── Load .env relative to exe/script path ──────────────────────
+def get_base_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = get_base_dir()
+
+def load_env():
+    env_path = os.path.join(BASE_DIR, ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    os.environ.setdefault(key.strip(), val.strip())
+
+load_env()
+
 # ── Config ────────────────────────────────────────────────────────
 DASHBOARD_URL = "https://pc-dashboard-monitor.vercel.app"
 COOLDOWN = 5.0
