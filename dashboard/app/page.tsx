@@ -287,29 +287,34 @@ export default function Home() {
   const cpuRef = useRef<(number | null)[]>([]);
   const ramRef = useRef<(number | null)[]>([]);
 
+  const sourceRef = useRef<"live" | "mock" | "err">("mock");
+  const dataRef = useRef<SensorData | null>(null);
+
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch("/api/sensors", { cache: "no-store", signal: AbortSignal.timeout(8000) });
       if (!res.ok) throw new Error();
       const json = parseData(await res.json());
       setData(json);
+      dataRef.current = json;
       cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), json.cpu_usage];
       ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), json.ram_usage];
+      sourceRef.current = "live";
       setSource("live"); setError(null);
     } catch {
-      // Keep last real data instead of falling back to mock
-      if (source !== "live" && source !== "mock") {
+      if (sourceRef.current !== "live" && sourceRef.current !== "mock") {
+        sourceRef.current = "mock";
         setSource("mock"); setData(MOCK);
         cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), MOCK.cpu_usage];
         ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), MOCK.ram_usage];
-      } else if (source === "live") {
-        // Was live but failed this cycle — keep last data, show error briefly
+      } else if (sourceRef.current === "live") {
         setError("Timeout — último dado real mantido");
-        cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), data?.cpu_usage ?? null];
-        ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), data?.ram_usage ?? null];
+        const last = dataRef.current;
+        cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), last?.cpu_usage ?? null];
+        ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), last?.ram_usage ?? null];
       }
     } finally { setLoading(false); }
-  }, [source]);
+  }, []);
 
   useEffect(() => {
     // Pre-fill history
@@ -318,7 +323,7 @@ export default function Home() {
       ramRef.current.push(38 + Math.random() * 15);
     }
     fetchData();
-    const id = setInterval(fetchData, 5000);
+    const id = setInterval(fetchData, 2000);
     return () => clearInterval(id);
   }, [fetchData]);
 
