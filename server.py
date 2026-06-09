@@ -11,18 +11,12 @@ import json
 import socket
 import subprocess
 import threading
+import argparse
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import psutil
 
-# ── Argparse ──────────────────────────────────────────────────────
-def parse_args():
-    import argparse
-    parser = argparse.ArgumentParser(description="PC Dashboard Monitor Backend")
-    parser.add_argument("--background", action="store_true", help="Run in background mode (no console output)")
-    return parser.parse_args()
-
-
-# ── Load .env ─────────────────────────────────────────────────────
+# ── Load .env relative to exe/script path ──────────────────────
 def get_base_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
@@ -42,23 +36,8 @@ def load_env():
 
 load_env()
 
-# ── Single-instance enforcement ───────────────────────────────────
-def enforce_single_instance():
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        mutex = kernel32.CreateMutexW(None, False, "PCDashboardMonitor_SensorDash")
-        last_error = kernel32.GetLastError()
-        if last_error == 183:
-            print("[SensorDash] Another instance already running. Exiting.")
-            sys.exit(0)
-    except Exception:
-        pass
-
-enforce_single_instance()
-
 # ── Config ────────────────────────────────────────────────────────
-COOLDOWN = 5.0
+COOLDOWN = 1.0
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -131,7 +110,6 @@ def read_lhm_csv():
             "/gpu-nvidia/0/temperature/0",  # NVIDIA
             "/gpu-intel/0/temperature/0",   # Intel Arc
         ])
-        # Fallback: any gpu temperature sensor
         if gpu_temp is None:
             for k, v in row.items():
                 if k.startswith("/gpu-") and "temperature" in k and v not in ("", "NaN"):
@@ -143,38 +121,29 @@ def read_lhm_csv():
                     except ValueError:
                         pass
 
-        # GPU usage (AMD: Load, NVIDIA: GPU Load)
+        # GPU usage from LHM (may be inaccurate for AMD — WMI is primary)
         gpu_usage = find_val([
-            "/gpu-amd/0/load/0",            # AMD GPU Load %
-            "/gpu-nvidia/0/load/0",         # NVIDIA GPU Load %
-            "/gpu-intel/0/load/0",          # Intel GPU Load %
+            "/gpu-amd/0/load/0",
+            "/gpu-nvidia/0/load/0",
+            "/gpu-intel/0/load/0",
         ])
         if gpu_usage is not None:
             gpu_usage = max(0.0, min(100.0, gpu_usage))
 
-        # VRAM: used/total in bytes
+        # VRAM
         vram_used_gb = None
         vram_total_gb = None
-        vram_used_val = find_val([
-            "/gpu-amd/0/smallData/0",       # AMD VRAM used (bytes)
-            "/gpu-nvidia/0/smallData/0",    # NVIDIA VRAM used
-        ])
+        vram_used_val = find_val(["/gpu-amd/0/smallData/0", "/gpu-nvidia/0/smallData/0"])
         if vram_used_val is not None:
             vram_used_gb = round(vram_used_val / 1e9, 1)
-        vram_total_val = find_val([
-            "/gpu-amd/0/data/0",            # AMD VRAM total (bytes)
-            "/gpu-nvidia/0/data/0",         # NVIDIA VRAM total
-        ])
+        vram_total_val = find_val(["/gpu-amd/0/data/0", "/gpu-nvidia/0/data/0"])
         if vram_total_val is not None:
             vram_total_gb = round(vram_total_val / 1e9, 1)
 
         # GPU Fan RPM
-        gpu_fan_rpm = find_val([
-            "/gpu-amd/0/fan/0",             # AMD GPU Fan
-            "/gpu-nvidia/0/fan/0",          # NVIDIA GPU Fan
-        ])
+        gpu_fan_rpm = find_val(["/gpu-amd/0/fan/0", "/gpu-nvidia/0/fan/0"])
 
-        # Detect GPU vendor from headers
+        # GPU vendor
         gpu_vendor = None
         gpu_headers = [h for h in headers if h.startswith("/gpu-")]
         if gpu_headers:
@@ -185,18 +154,6 @@ def read_lhm_csv():
                 gpu_vendor = "nvidia"
             elif "intel" in first_gpu:
                 gpu_vendor = "intel"
-
-        # CPU cores from LHM
-        cpu_cores = None
-        core_temps = []
-        for h, v in row.items():
-            if "temperature" in h and ("/amdcpu/" in h or "/intelcpu/" in h):
-                try:
-                    val = float(v.replace(",", "."))
-                    if 0 < val < 120:
-                        core_temps.append(val)
-                except (ValueError, AttributeError):
-                    pass
 
         return {
             "cpu_temp": cpu_temp,
@@ -250,7 +207,32 @@ def read_cpu_temp():
     return None
 
 def read_gpu():
-    # Primary: LibreHardwareMonitor CSV
+    # Priority 1: WMI (most accurate for AMD GPU usage on Windows)
+    try:
+        cmd = ('Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue '
+               '| Select-Object -ExpandProperty CounterSamples '
+               '| Where-Object { $_.CookedValue -gt 0 -and $_.Path -match "engtype_3D" } '
+               '| Measure-Object CookedValue -Sum | Select-Object -ExpandProperty Sum')
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
+                           capture_output=True, text=True, timeout=4,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        raw = r.stdout.strip().replace(",", ".")
+        if raw:
+            wmi_usage = round(float(raw), 1)
+            # Get temp/vram from LHM as supplement
+            lhm = read_lhm_csv()
+            return {
+                "gpu_usage": wmi_usage,
+                "gpu_temp": lhm.get("gpu_temp") if lhm else None,
+                "vram_used": lhm.get("vram_used") if lhm else None,
+                "vram_total": lhm.get("vram_total") if lhm else None,
+                "gpu_fan_rpm": lhm.get("gpu_fan_rpm") if lhm else None,
+                "gpu_vendor": lhm.get("gpu_vendor") if lhm else "amd",
+            }
+    except Exception:
+        pass
+
+    # Priority 2: LHM CSV (fallback for temp/vram when WMI fails)
     lhm = read_lhm_csv()
     if lhm and (lhm.get("gpu_temp") is not None or lhm.get("gpu_usage") is not None):
         return {
@@ -262,7 +244,7 @@ def read_gpu():
             "gpu_vendor": lhm.get("gpu_vendor"),
         }
 
-    # Fallback 1: pynvml (NVIDIA)
+    # Priority 3: pynvml (NVIDIA)
     if NVIDIA_AVAILABLE:
         try:
             h = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -275,7 +257,7 @@ def read_gpu():
         except Exception:
             pass
 
-    # Fallback 2: pyamdgpuinfo (AMD)
+    # Priority 4: pyamdgpuinfo
     if AMD_AVAILABLE:
         try:
             g = pyamdgpuinfo.get_gpu(0)
@@ -286,22 +268,6 @@ def read_gpu():
                     "gpu_fan_rpm": None, "gpu_vendor": "amd"}
         except Exception:
             pass
-
-    # Fallback 3: WMI (very limited)
-    try:
-        cmd = ('Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue '
-               '| Select-Object -ExpandProperty CounterSamples '
-               '| Where-Object { $_.CookedValue -gt 0 -and $_.Path -match "engtype_3d" } '
-               '| Measure-Object CookedValue -Average | Select-Object -ExpandProperty Average')
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                           capture_output=True, text=True, timeout=4,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        raw = r.stdout.strip().replace(",", ".")
-        gpu_usage = round(float(raw), 1) if raw else None
-        return {"gpu_usage": gpu_usage, "gpu_temp": None,
-                "vram_used": None, "vram_total": None, "gpu_fan_rpm": None, "gpu_vendor": None}
-    except Exception:
-        pass
 
     return {"gpu_usage": None, "gpu_temp": None, "vram_used": None,
             "vram_total": None, "gpu_fan_rpm": None, "gpu_vendor": None}
@@ -323,10 +289,11 @@ def read_storage():
 
 def collect():
     vm = psutil.virtual_memory()
-    cores = psutil.cpu_percent(interval=0.3, percpu=True)
+    cores = psutil.cpu_percent(interval=0.1, percpu=True)
+    cpu_avg = sum(cores) / len(cores) if cores else 0.0
     gpu = read_gpu()
     return {
-        "cpu_usage": round(psutil.cpu_percent(interval=0.3), 1),
+        "cpu_usage": round(cpu_avg, 1),
         "cpu_temp": read_cpu_temp(),
         "cpu_cores": [round(c, 1) for c in cores],
         "ram_used": round(vm.used / 1e9, 2),
@@ -388,8 +355,6 @@ def sensor_loop():
         time.sleep(COOLDOWN)
 
 # ── HTTP server ──────────────────────────────────────────────────
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/api/sensors", "/api/sensors/"):
@@ -412,21 +377,22 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 def http_server():
-    port = PORT
-    try:
-        srv = HTTPServer(("0.0.0.0", port), Handler)
-        print(f"[HTTP] Listening on port {port}")
-        srv.serve_forever()
-    except OSError as e:
-        print(f"[HTTP] Cannot bind port {port}: {e}")
+    port = 8080
+    while True:
+        try:
+            srv = HTTPServer(("0.0.0.0", port), Handler)
+            break
+        except OSError:
+            port += 1
+    print(f"[HTTP] Listening on port {port}")
+    srv.serve_forever()
 
 # ── Main ─────────────────────────────────────────────────────────
 def main():
-    global _running
     args = parse_args()
 
     if not args.background:
-        print(f"[SensorDash] Starting on port {PORT}...")
+        print(f"[SensorDash] Starting on port 8080...")
         print(f"  NVIDIA: {NVIDIA_AVAILABLE} | AMD: {AMD_AVAILABLE}")
         print(f"  Cooldown: {COOLDOWN}s")
         print(f"  Supabase: {'enabled' if SUPABASE_URL and SUPABASE_KEY else 'disabled'}")
@@ -439,6 +405,7 @@ def main():
             while _running:
                 time.sleep(1)
         except KeyboardInterrupt:
+            global _running
             _running = False
     else:
         print("[SensorDash] Press Ctrl+C to stop.")
@@ -446,8 +413,13 @@ def main():
             while True:
                 time.sleep(3600)
         except KeyboardInterrupt:
+            global _running
             _running = False
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="PC Dashboard Monitor Backend")
+    parser.add_argument("--background", action="store_true", help="Run in background mode (no console output)")
+    return parser.parse_args()
 
 if __name__ == "__main__":
     main()

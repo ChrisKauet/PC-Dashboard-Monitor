@@ -43,7 +43,7 @@ load_env()
 
 # ── Config ────────────────────────────────────────────────────────
 DASHBOARD_URL = "https://pc-dashboard-monitor.vercel.app"
-COOLDOWN = 5.0
+COOLDOWN = 1.0
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -234,20 +234,52 @@ def read_cpu_temp():
             pass
     return None
 
-def read_gpu():
-    # Primary: LibreHardwareMonitor CSV
-    lhm = read_lhm_csv()
-    if lhm and (lhm.get("gpu_temp") is not None or lhm.get("gpu_usage") is not None):
-        return {
-            "gpu_usage": lhm.get("gpu_usage"),
-            "gpu_temp": lhm.get("gpu_temp"),
-            "vram_used": lhm.get("vram_used"),
-            "vram_total": lhm.get("vram_total"),
-            "gpu_fan_rpm": lhm.get("gpu_fan_rpm"),
-            "gpu_vendor": lhm.get("gpu_vendor"),
-        }
+def read_gpu(lhm=None):
+    """GPU reading: WMI is primary (most reliable for AMD), then pyamdgpuinfo, then LHM CSV."""
+    # Primary: WMI (most reliable for AMD RX 7600)
+    try:
+        cmd = ('Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue '
+               '| Select-Object -ExpandProperty CounterSamples '
+               '| Where-Object { $_.CookedValue -gt 0 -and $_.Path -match "engtype_3d" } '
+               '| Measure-Object CookedValue -Sum | Select-Object -ExpandProperty Sum')
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
+                           capture_output=True, text=True, timeout=4,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        raw = r.stdout.strip().replace(",", ".")
+        if raw:
+            gpu_usage = round(float(raw), 1)
+            # Use provided LHM data or read once
+            if lhm is None:
+                lhm = read_lhm_csv()
+            gpu_temp = lhm.get("gpu_temp") if lhm else None
+            vram_used = lhm.get("vram_used") if lhm else None
+            vram_total = lhm.get("vram_total") if lhm else None
+            gpu_fan_rpm = lhm.get("gpu_fan_rpm") if lhm else None
+            gpu_vendor = lhm.get("gpu_vendor") if lhm else "amd"
+            return {
+                "gpu_usage": gpu_usage,
+                "gpu_temp": gpu_temp,
+                "vram_used": vram_used,
+                "vram_total": vram_total,
+                "gpu_fan_rpm": gpu_fan_rpm,
+                "gpu_vendor": gpu_vendor,
+            }
+    except Exception:
+        pass
 
-    # Fallback 1: pynvml (NVIDIA)
+    # Fallback 1: pyamdgpuinfo (AMD)
+    if AMD_AVAILABLE:
+        try:
+            g = pyamdgpuinfo.get_gpu(0)
+            return {"gpu_usage": round(g.query_load() * 100, 1),
+                    "gpu_temp": round(g.query_temperature(), 1),
+                    "vram_used": round(g.query_vram_usage() / 1e6, 1),
+                    "vram_total": round(g.memory_info["vram_size"] / 1e6, 1),
+                    "gpu_fan_rpm": None, "gpu_vendor": "amd"}
+        except Exception:
+            pass
+
+    # Fallback 2: pynvml (NVIDIA)
     if NVIDIA_AVAILABLE:
         try:
             h = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -260,33 +292,18 @@ def read_gpu():
         except Exception:
             pass
 
-    # Fallback 2: pyamdgpuinfo (AMD)
-    if AMD_AVAILABLE:
-        try:
-            g = pyamdgpuinfo.get_gpu(0)
-            return {"gpu_usage": round(g.query_load() * 100, 1),
-                    "gpu_temp": round(g.query_temperature(), 1),
-                    "vram_used": round(g.query_vram_usage() / 1e6, 1),
-                    "vram_total": round(g.memory_info["vram_size"] / 1e6, 1),
-                    "gpu_fan_rpm": None, "gpu_vendor": "amd"}
-        except Exception:
-            pass
-
-    # Fallback 3: WMI (very limited)
-    try:
-        cmd = ('Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue '
-               '| Select-Object -ExpandProperty CounterSamples '
-               '| Where-Object { $_.CookedValue -gt 0 -and $_.Path -match "engtype_3d" } '
-               '| Measure-Object CookedValue -Average | Select-Object -ExpandProperty Average')
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                           capture_output=True, text=True, timeout=4,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        raw = r.stdout.strip().replace(",", ".")
-        gpu_usage = round(float(raw), 1) if raw else None
-        return {"gpu_usage": gpu_usage, "gpu_temp": None,
-                "vram_used": None, "vram_total": None, "gpu_fan_rpm": None, "gpu_vendor": None}
-    except Exception:
-        pass
+    # Fallback 3: LHM CSV (least reliable for usage on AMD)
+    if lhm is None:
+        lhm = read_lhm_csv()
+    if lhm and (lhm.get("gpu_temp") is not None or lhm.get("gpu_usage") is not None):
+        return {
+            "gpu_usage": lhm.get("gpu_usage"),
+            "gpu_temp": lhm.get("gpu_temp"),
+            "vram_used": lhm.get("vram_used"),
+            "vram_total": lhm.get("vram_total"),
+            "gpu_fan_rpm": lhm.get("gpu_fan_rpm"),
+            "gpu_vendor": lhm.get("gpu_vendor"),
+        }
 
     return {"gpu_usage": None, "gpu_temp": None, "vram_used": None,
             "vram_total": None, "gpu_fan_rpm": None, "gpu_vendor": None}
@@ -308,11 +325,24 @@ def read_storage():
 
 def collect():
     vm = psutil.virtual_memory()
-    cores = psutil.cpu_percent(interval=0.3, percpu=True)
-    gpu = read_gpu()
+    cores = psutil.cpu_percent(interval=0.1, percpu=True)
+    cpu_avg = sum(cores) / len(cores) if cores else 0.0
+    # Single LHM read shared between GPU and CPU temp
+    lhm = read_lhm_csv()
+    gpu = read_gpu(lhm=lhm)
+    cpu_temp = lhm.get("cpu_temp") if lhm else None
+    if cpu_temp is None:
+        try:
+            temps = psutil.sensors_temperatures()
+            for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz", "zenpower"):
+                if key in temps and temps[key]:
+                    cpu_temp = round(temps[key][0].current, 1)
+                    break
+        except Exception:
+            pass
     return {
-        "cpu_usage": round(psutil.cpu_percent(interval=0.3), 1),
-        "cpu_temp": read_cpu_temp(),
+        "cpu_usage": round(cpu_avg, 1),
+        "cpu_temp": cpu_temp,
         "cpu_cores": [round(c, 1) for c in cores],
         "ram_used": round(vm.used / 1e9, 2),
         "ram_total": round(vm.total / 1e9, 2),
