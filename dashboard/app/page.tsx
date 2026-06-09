@@ -289,7 +289,7 @@ export default function Home() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch("/api/sensors", { cache: "no-store", signal: AbortSignal.timeout(3000) });
+      const res = await fetch("/api/sensors", { cache: "no-store", signal: AbortSignal.timeout(8000) });
       if (!res.ok) throw new Error();
       const json = parseData(await res.json());
       setData(json);
@@ -297,10 +297,17 @@ export default function Home() {
       ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), json.ram_usage];
       setSource("live"); setError(null);
     } catch {
-      if (source !== "mock") { setSource("mock"); setData(MOCK); }
-      setError(null);
-      cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), MOCK.cpu_usage];
-      ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), MOCK.ram_usage];
+      // Keep last real data instead of falling back to mock
+      if (source !== "live" && source !== "mock") {
+        setSource("mock"); setData(MOCK);
+        cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), MOCK.cpu_usage];
+        ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), MOCK.ram_usage];
+      } else if (source === "live") {
+        // Was live but failed this cycle — keep last data, show error briefly
+        setError("Timeout — último dado real mantido");
+        cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), data?.cpu_usage ?? null];
+        ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), data?.ram_usage ?? null];
+      }
     } finally { setLoading(false); }
   }, [source]);
 
