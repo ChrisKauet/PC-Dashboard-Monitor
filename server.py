@@ -11,6 +11,7 @@ import json
 import socket
 import subprocess
 import threading
+import argparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import psutil
@@ -33,6 +34,17 @@ def load_env():
                 if line and not line.startswith("#") and "=" in line:
                     key, _, val = line.partition("=")
                     os.environ.setdefault(key.strip(), val.strip())
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="PC Dashboard Monitor Backend")
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Run in background mode (no console output, for executable)"
+    )
+    return parser.parse_args()
+
 
 load_env()
 
@@ -208,7 +220,8 @@ def read_lhm_sensors():
             )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", cmd],
-                capture_output=True, text=True, timeout=4
+                capture_output=True, text=True, timeout=4,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             if result.returncode == 0 and result.stdout.strip():
                 lines = result.stdout.strip().splitlines()
@@ -241,7 +254,8 @@ def read_gpu_wmi():
         )
         result_usage = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd_usage],
-            capture_output=True, text=True, timeout=4
+            capture_output=True, text=True, timeout=4,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
         raw = result_usage.stdout.strip().replace(',', '.')
         gpu_usage = round(float(raw), 1) if raw else None
@@ -253,7 +267,8 @@ def read_gpu_wmi():
         )
         result_info = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd_info],
-            capture_output=True, text=True, timeout=4
+            capture_output=True, text=True, timeout=4,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
         vram_total = None
         gpu_vendor = None
@@ -376,7 +391,8 @@ def read_cpu_temp():
         )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd],
-            capture_output=True, text=True, timeout=4
+            capture_output=True, text=True, timeout=4,
+            creationflags=subprocess.CREATE_NO_WINDOW
         )
         if result.returncode == 0 and result.stdout.strip():
             raw = result.stdout.strip().splitlines()[0].strip()
@@ -511,25 +527,37 @@ class Handler(BaseHTTPRequestHandler):
 
 # ── Main ─────────────────────────────────────────────────────────
 def main():
-    print(f"[SensorDash] Starting HTTP sensor collector on port {PORT}...")
-    print(f"  NVIDIA: {NVIDIA_AVAILABLE} | AMD: {AMD_AVAILABLE}")
-    print(f"  Cooldown: {COOLDOWN}s")
-    print(f"  Supabase: {'enabled' if SUPABASE_URL else 'disabled'}")
+    args = parse_args()
+    
+    if not args.background:
+        print(f"[SensorDash] Starting HTTP sensor collector on port {PORT}...")
+        print(f"  NVIDIA: {NVIDIA_AVAILABLE} | AMD: {AMD_AVAILABLE}")
+        print(f"  Cooldown: {COOLDOWN}s")
+        print(f"  Supabase: {'enabled' if SUPABASE_URL else 'disabled'}")
 
     # Start sensor collection thread
     sensor_thread = threading.Thread(target=sensor_loop, daemon=True)
     sensor_thread.start()
 
-    # Start HTTP server
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[SensorDash] Running at http://localhost:{PORT}/api/sensors")
-    print(f"[SensorDash] Press Ctrl+C to stop.")
+    if not args.background:
+        # Start HTTP server (only in foreground mode)
+        server = HTTPServer(("0.0.0.0", PORT), Handler)
+        print(f"[SensorDash] Running at http://localhost:{PORT}/api/sensors")
+        print(f"[SensorDash] Press Ctrl+C to stop.")
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[SensorDash] Shutting down...")
-        server.shutdown()
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n[SensorDash] Shutting down...")
+            server.shutdown()
+    else:
+        # In background mode, just keep the thread alive
+        try:
+            while True:
+                time.sleep(3600)  # Sleep in 1-hour chunks
+        except KeyboardInterrupt:
+            pass
+
 
 if __name__ == "__main__":
     main()

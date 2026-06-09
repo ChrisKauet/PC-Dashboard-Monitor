@@ -37,15 +37,6 @@ build/
 dist/
 *.spec
 
-# Executable resources
-resources/
-
-# New executable files
-main.py
-tray_launcher.py
-generate_icon.py
-test.txt
-
 # Backup files
 *.backup
 *.backup-*

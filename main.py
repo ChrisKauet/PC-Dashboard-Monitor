@@ -56,39 +56,126 @@ def _find_latest_lhm_csv():
 def read_lhm_csv():
     csv_path = _find_latest_lhm_csv()
     if not csv_path:
-        return {"cpu_temp": None, "gpu_temp": None}
+        return None
     try:
         age = time.time() - os.path.getmtime(csv_path)
         if age > 60:
-            return {"cpu_temp": None, "gpu_temp": None}
+            return None
         with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         if len(lines) < 2:
-            return {"cpu_temp": None, "gpu_temp": None}
+            return None
         raw_headers = lines[0].rstrip("\n").split(",")
         headers = [h.strip().strip('"') for h in raw_headers]
         raw_values = lines[-1].rstrip("\n").split(",")
         values = [v.strip().strip('"') for v in raw_values]
         row = {h: values[i] for i, h in enumerate(headers) if i < len(values)}
 
-        def find_temp(priority_keys):
+        def find_val(priority_keys):
             for key in priority_keys:
                 if key in row and row[key] not in ("", "NaN"):
                     try:
                         v = float(row[key].replace(",", "."))
-                        if 0 < v < 120:
-                            return round(v, 1)
+                        return round(v, 1)
                     except ValueError:
                         pass
             return None
 
-        cpu_temp = find_temp(["/amdcpu/0/temperature/2", "/intelcpu/0/temperature/0",
-                              "/amdcpu/0/temperature/0", "/intelcpu/0/temperature/2"])
-        gpu_temp = find_temp(["/gpu-amd/0/temperature/0", "/gpu-nvidia/0/temperature/0",
-                              "/gpu-intel/0/temperature/0", "/gpu-amd/0/temperature/1"])
-        return {"cpu_temp": cpu_temp, "gpu_temp": gpu_temp}
-    except Exception:
-        return {"cpu_temp": None, "gpu_temp": None}
+        # CPU temperature
+        cpu_temp = find_val([
+            "/amdcpu/0/temperature/2",
+            "/intelcpu/0/temperature/0",
+            "/amdcpu/0/temperature/0",
+            "/intelcpu/0/temperature/2",
+        ])
+
+        # GPU temperature (all vendors)
+        gpu_temp = find_val([
+            "/gpu-amd/0/temperature/0",     # AMD GPU Core
+            "/gpu-amd/0/temperature/1",     # AMD GPU Hot Spot
+            "/gpu-nvidia/0/temperature/0",  # NVIDIA
+            "/gpu-intel/0/temperature/0",   # Intel Arc
+        ])
+        # Fallback: any gpu temperature sensor
+        if gpu_temp is None:
+            for k, v in row.items():
+                if k.startswith("/gpu-") and "temperature" in k and v not in ("", "NaN"):
+                    try:
+                        val = float(v.replace(",", "."))
+                        if 0 < val < 120:
+                            gpu_temp = round(val, 1)
+                            break
+                    except ValueError:
+                        pass
+
+        # GPU usage (AMD: Load, NVIDIA: GPU Load)
+        gpu_usage = find_val([
+            "/gpu-amd/0/load/0",            # AMD GPU Load %
+            "/gpu-nvidia/0/load/0",         # NVIDIA GPU Load %
+            "/gpu-intel/0/load/0",          # Intel GPU Load %
+        ])
+        if gpu_usage is not None:
+            gpu_usage = max(0.0, min(100.0, gpu_usage))
+
+        # VRAM: used/total in bytes
+        vram_used_gb = None
+        vram_total_gb = None
+        vram_used_val = find_val([
+            "/gpu-amd/0/smallData/0",       # AMD VRAM used (bytes)
+            "/gpu-nvidia/0/smallData/0",    # NVIDIA VRAM used
+        ])
+        if vram_used_val is not None:
+            vram_used_gb = round(vram_used_val / 1e9, 1)
+        vram_total_val = find_val([
+            "/gpu-amd/0/data/0",            # AMD VRAM total (bytes)
+            "/gpu-nvidia/0/data/0",         # NVIDIA VRAM total
+        ])
+        if vram_total_val is not None:
+            vram_total_gb = round(vram_total_val / 1e9, 1)
+
+        # GPU Fan RPM
+        gpu_fan_rpm = find_val([
+            "/gpu-amd/0/fan/0",             # AMD GPU Fan
+            "/gpu-nvidia/0/fan/0",          # NVIDIA GPU Fan
+        ])
+
+        # Detect GPU vendor from headers
+        gpu_vendor = None
+        gpu_headers = [h for h in headers if h.startswith("/gpu-")]
+        if gpu_headers:
+            first_gpu = gpu_headers[0]
+            if "amd" in first_gpu:
+                gpu_vendor = "amd"
+            elif "nvidia" in first_gpu:
+                gpu_vendor = "nvidia"
+            elif "intel" in first_gpu:
+                gpu_vendor = "intel"
+
+        # CPU cores from LHM
+        cpu_cores = None
+        core_temps = []
+        for h, v in row.items():
+            if "temperature" in h and ("/amdcpu/" in h or "/intelcpu/" in h):
+                try:
+                    val = float(v.replace(",", "."))
+                    if 0 < val < 120:
+                        core_temps.append(val)
+                except (ValueError, AttributeError):
+                    pass
+
+        return {
+            "cpu_temp": cpu_temp,
+            "gpu_temp": gpu_temp,
+            "gpu_usage": gpu_usage,
+            "vram_used": vram_used_gb,
+            "vram_total": vram_total_gb,
+            "gpu_fan_rpm": gpu_fan_rpm if gpu_fan_rpm and gpu_fan_rpm > 0 else None,
+            "gpu_vendor": gpu_vendor,
+            "lhm_stale": False,
+        }
+    except Exception as e:
+        print(f"[LHM CSV] Error: {e}")
+        return None
 
 def read_cpu_temp():
     try:
@@ -128,6 +215,19 @@ def read_cpu_temp():
     return None
 
 def read_gpu():
+    # Primary: LibreHardwareMonitor CSV
+    lhm = read_lhm_csv()
+    if lhm and (lhm.get("gpu_temp") is not None or lhm.get("gpu_usage") is not None):
+        return {
+            "gpu_usage": lhm.get("gpu_usage"),
+            "gpu_temp": lhm.get("gpu_temp"),
+            "vram_used": lhm.get("vram_used"),
+            "vram_total": lhm.get("vram_total"),
+            "gpu_fan_rpm": lhm.get("gpu_fan_rpm"),
+            "gpu_vendor": lhm.get("gpu_vendor"),
+        }
+
+    # Fallback 1: pynvml (NVIDIA)
     if NVIDIA_AVAILABLE:
         try:
             h = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -139,6 +239,8 @@ def read_gpu():
                     "gpu_fan_rpm": None, "gpu_vendor": "nvidia"}
         except Exception:
             pass
+
+    # Fallback 2: pyamdgpuinfo (AMD)
     if AMD_AVAILABLE:
         try:
             g = pyamdgpuinfo.get_gpu(0)
@@ -149,7 +251,8 @@ def read_gpu():
                     "gpu_fan_rpm": None, "gpu_vendor": "amd"}
         except Exception:
             pass
-    # WMI fallback
+
+    # Fallback 3: WMI (very limited)
     try:
         cmd = ('Get-Counter "\\GPU Engine(*)\\Utilization Percentage" -ErrorAction SilentlyContinue '
                '| Select-Object -ExpandProperty CounterSamples '
@@ -160,11 +263,11 @@ def read_gpu():
                            creationflags=subprocess.CREATE_NO_WINDOW)
         raw = r.stdout.strip().replace(",", ".")
         gpu_usage = round(float(raw), 1) if raw else None
-        gpu_temp = read_lhm_csv().get("gpu_temp")
-        return {"gpu_usage": gpu_usage, "gpu_temp": gpu_temp,
+        return {"gpu_usage": gpu_usage, "gpu_temp": None,
                 "vram_used": None, "vram_total": None, "gpu_fan_rpm": None, "gpu_vendor": None}
     except Exception:
         pass
+
     return {"gpu_usage": None, "gpu_temp": None, "vram_used": None,
             "vram_total": None, "gpu_fan_rpm": None, "gpu_vendor": None}
 
