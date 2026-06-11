@@ -51,8 +51,14 @@ function fmtUptime(s: number | null) {
 }
 
 function parseData(d: SensorData): SensorData {
-  if (typeof d.cpu_cores === "string") { try { d.cpu_cores = JSON.parse(d.cpu_cores); } catch { /* ignore */ } }
-  if (typeof d.storage === "string") { try { d.storage = JSON.parse(d.storage); } catch { /* ignore */ } }
+  if (typeof d.cpu_cores === "string") {
+    try { d.cpu_cores = JSON.parse(d.cpu_cores); }
+    catch { d.cpu_cores = null; }
+  }
+  if (typeof d.storage === "string") {
+    try { d.storage = JSON.parse(d.storage); }
+    catch { d.storage = null; }
+  }
   return d;
 }
 
@@ -119,8 +125,8 @@ function InfoList({ uptime, dl, ul, watts, procs }: {
 }) {
   const items = [
     { icon: <IconClock size={16} />, label: "Uptime", val: uptime },
-    { icon: <IconArrowDown size={16} />, label: "Download", val: dl != null ? `${dl} MB/s` : "—" },
-    { icon: <IconArrowUp size={16} />, label: "Upload", val: ul != null ? `${ul} MB/s` : "—" },
+    { icon: <IconArrowDown size={16} />, label: "Download", val: dl != null ? `${dl.toFixed(2)} MB/s` : "—" },
+    { icon: <IconArrowUp size={16} />, label: "Upload", val: ul != null ? `${ul.toFixed(2)} MB/s` : "—" },
     { icon: <IconBolt size={16} />, label: "Energia", val: watts != null ? `${watts}W` : "—" },
     { icon: <IconApps size={16} />, label: "Processos", val: procs != null ? `${procs}` : "—" },
   ];
@@ -284,44 +290,57 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState<"live" | "mock" | "err">("mock");
-  const cpuRef = useRef<(number | null)[]>([]);
-  const ramRef = useRef<(number | null)[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
+  // History as state so chart re-renders reliably on every update
+  const [cpuHistory, setCpuHistory] = useState<(number | null)[]>(() =>
+    Array.from({ length: HLEN }, () => 8 + Math.random() * 18)
+  );
+  const [ramHistory, setRamHistory] = useState<(number | null)[]>(() =>
+    Array.from({ length: HLEN }, () => 38 + Math.random() * 15)
+  );
+
+  // Ref tracks source inside memoized callback (avoids stale closure)
   const sourceRef = useRef<"live" | "mock" | "err">("mock");
-  const dataRef = useRef<SensorData | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch("/api/sensors", { cache: "no-store", signal: AbortSignal.timeout(8000) });
-      if (!res.ok) throw new Error();
+      const res = await fetch("/api/sensors", {
+        cache: "no-store",
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = parseData(await res.json());
+
+      // no_data means DB is empty — keep displaying last state silently
+      if (json.status === "no_data") return;
+
       setData(json);
-      dataRef.current = json;
-      cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), json.cpu_usage];
-      ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), json.ram_usage];
+      setCpuHistory(prev => [...prev.slice(-(HLEN - 1)), json.cpu_usage]);
+      setRamHistory(prev => [...prev.slice(-(HLEN - 1)), json.ram_usage]);
+      setLastUpdated(new Date());
       sourceRef.current = "live";
-      setSource("live"); setError(null);
+      setSource("live");
+      setError(null);
     } catch {
       if (sourceRef.current !== "live" && sourceRef.current !== "mock") {
         sourceRef.current = "mock";
-        setSource("mock"); setData(MOCK);
-        cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), MOCK.cpu_usage];
-        ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), MOCK.ram_usage];
+        setSource("mock");
+        setData(MOCK);
+        setCpuHistory(prev => [...prev.slice(-(HLEN - 1)), MOCK.cpu_usage]);
+        setRamHistory(prev => [...prev.slice(-(HLEN - 1)), MOCK.ram_usage]);
       } else if (sourceRef.current === "live") {
         setError("Timeout — último dado real mantido");
-        const last = dataRef.current;
-        cpuRef.current = [...cpuRef.current.slice(-(HLEN - 1)), last?.cpu_usage ?? null];
-        ramRef.current = [...ramRef.current.slice(-(HLEN - 1)), last?.ram_usage ?? null];
+        // Append null to show gap in chart during outage
+        setCpuHistory(prev => [...prev.slice(-(HLEN - 1)), null]);
+        setRamHistory(prev => [...prev.slice(-(HLEN - 1)), null]);
       }
-    } finally { setLoading(false); }
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    // Pre-fill history
-    for (let i = 0; i < HLEN; i++) {
-      cpuRef.current.push(8 + Math.random() * 18);
-      ramRef.current.push(38 + Math.random() * 15);
-    }
     fetchData();
     const id = setInterval(fetchData, 2000);
     return () => clearInterval(id);
@@ -332,6 +351,11 @@ export default function Home() {
     ? (Array.isArray(d.cpu_cores) ? d.cpu_cores.length : String(d.cpu_cores).split(",").length)
     : null;
   const procs = (d.processes && d.processes.length ? d.processes : MOCK.processes) as Proc[];
+
+  // Stale data indicator: warn if last successful update is older than 30s
+  const staleSeconds = source === "live" && lastUpdated
+    ? Math.round((Date.now() - lastUpdated.getTime()) / 1000)
+    : 0;
 
   return (
     <div className="app">
@@ -354,7 +378,18 @@ export default function Home() {
       <div className="status-bar">
         <div className="status-source">
           <div className={`sdot sdot-${source}`} />
-          <span>{source === "live" ? "Dados ao vivo · API" : source === "mock" ? "Modo demonstração (mock)" : "Erro de conexão"}</span>
+          <span>
+            {source === "live"
+              ? "Dados ao vivo · API"
+              : source === "mock"
+              ? "⚠ DEMO — dados simulados (backend offline)"
+              : "Erro de conexão"}
+            {staleSeconds > 30 && (
+              <span style={{ color: "#f59e0b", marginLeft: 8, fontSize: 11 }}>
+                ({staleSeconds}s sem atualizar)
+              </span>
+            )}
+          </span>
         </div>
         <span>{new Date().toLocaleTimeString("pt-BR")}</span>
       </div>
@@ -412,7 +447,7 @@ export default function Home() {
 
           {/* Mid Grid */}
           <MidGrid
-            cpuH={cpuRef.current} ramH={ramRef.current}
+            cpuH={cpuHistory} ramH={ramHistory}
             uptime={fmtUptime(d.uptime_sec)}
             dl={d.dl_speed ?? null} ul={d.ul_speed ?? null}
             watts={d.watts ?? null} procs={d.process_count ?? null}
@@ -427,7 +462,7 @@ export default function Home() {
       )}
 
       {/* Footer */}
-      <div className="footer"><p>SYS.MONITOR · atualiza a cada 5s</p></div>
+      <div className="footer"><p>SYS.MONITOR · atualiza a cada 2s</p></div>
     </div>
   );
 }
